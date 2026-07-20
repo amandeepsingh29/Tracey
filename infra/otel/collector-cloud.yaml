@@ -1,0 +1,107 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  attributes/redact:
+    actions:
+      - key: user.email
+        action: delete
+      - key: user.account_id
+        action: delete
+      - key: user.account_uuid
+        action: delete
+      - key: organization.id
+        action: delete
+      - key: workspace.host_paths
+        action: delete
+      - key: prompt
+        action: delete
+      - key: output
+        action: delete
+      - key: arguments
+        action: delete
+      - key: result
+        action: delete
+      - key: command
+        action: delete
+      - key: full_command
+        action: delete
+      - key: tool_input
+        action: delete
+      - key: tool_parameters
+        action: delete
+      - key: file_path
+        action: delete
+      - key: request.body
+        action: delete
+      - key: response.body
+        action: delete
+      - key: gen_ai.input.messages
+        action: delete
+      - key: gen_ai.output.messages
+        action: delete
+      - key: gen_ai.system_instructions
+        action: delete
+      - key: gen_ai.tool.call.arguments
+        action: delete
+      - key: gen_ai.tool.call.result
+        action: delete
+  resource/scope:
+    attributes:
+      - key: host.name
+        action: delete
+      - key: tracey.tenant.id
+        value: ${env:TRACEY_TENANT_ID}
+        action: upsert
+      - key: deployment.environment.name
+        value: ${env:DEPLOYMENT_ENVIRONMENT}
+        action: upsert
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  otlp_http/signoz:
+    endpoint: ${env:SIGNOZ_OTLP_ENDPOINT}
+    headers:
+      signoz-ingestion-key: ${env:SIGNOZ_INGESTION_KEY}
+    compression: gzip
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 1000
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, resource/scope, batch]
+      exporters: [otlp_http/signoz]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, resource/scope, batch]
+      exporters: [otlp_http/signoz]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, resource/scope, batch]
+      exporters: [otlp_http/signoz]

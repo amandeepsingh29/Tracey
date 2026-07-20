@@ -1,0 +1,529 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tracey-investigator
+  namespace: production
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tracey-executor
+  namespace: production
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracey-investigator
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes", "pods", "pods/log", "events", "services", "endpoints", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/status", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps", "batch", "autoscaling", "networking.k8s.io", "policy", "storage.k8s.io", "coordination.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "limitranges", "nodes", "persistentvolumes", "resourcequotas"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracey-investigator
+subjects:
+  - kind: ServiceAccount
+    name: tracey-investigator
+    namespace: production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracey-investigator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracey-executor
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # Broad operator-confirmed control without credential or identity mutation.
+  # The executor API still validates a durable approved proposal before using
+  # these permissions.
+  - apiGroups: ["apps", "batch", "autoscaling", "networking.k8s.io", "policy", "storage.k8s.io", "coordination.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints", "limitranges", "nodes", "persistentvolumeclaims", "persistentvolumes", "pods", "resourcequotas", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracey-executor
+subjects:
+  - kind: ServiceAccount
+    name: tracey-executor
+    namespace: production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracey-executor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracey-api
+  namespace: production
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: tracey-api
+  template:
+    metadata:
+      labels:
+        app: tracey-api
+        app.kubernetes.io/part-of: tracey
+    spec:
+      serviceAccountName: tracey-investigator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: tracey-api:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # SigNoz Cloud publishes IPv4 and DNS64/IPv6 answers. kind on macOS
+            # can open the IPv4 route but cannot complete Node's parallel
+            # family-selection attempt, so undici otherwise times out even
+            # though a direct IPv4 HTTPS request succeeds.
+            - name: NODE_OPTIONS
+              value: "--no-network-family-autoselection"
+            - name: TRACEY_KUBERNETES_EXECUTOR_ENABLED
+              value: "false"
+            - name: TRACEY_KUBERNETES_INVESTIGATOR_ENABLED
+              value: "true"
+            - name: TRACEY_EXECUTOR_URL
+              value: "http://tracey-executor-service:3002"
+          envFrom:
+            - secretRef:
+                name: tracey-api-env
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracey-api-service
+  namespace: production
+spec:
+  selector:
+    app: tracey-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tracey-api
+  namespace: production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tracey-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracey-executor
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tracey-executor
+  template:
+    metadata:
+      labels:
+        app: tracey-executor
+        app.kubernetes.io/part-of: tracey
+    spec:
+      serviceAccountName: tracey-executor
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: executor
+          image: tracey-executor:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 3002
+          envFrom:
+            - secretRef:
+                name: tracey-executor-env
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracey-executor-service
+  namespace: production
+spec:
+  selector:
+    app: tracey-executor
+  ports:
+    - name: http
+      port: 3002
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tracey-executor
+  namespace: production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tracey-executor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracey-worker
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tracey-worker
+  template:
+    metadata:
+      labels:
+        app: tracey-worker
+        app.kubernetes.io/part-of: tracey
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: tracey-worker:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: health
+              containerPort: 3001
+          env:
+            - name: TRACEY_API_URL
+              value: "http://tracey-api-service:3000"
+            - name: WORKER_HEALTH_PORT
+              value: "3001"
+          envFrom:
+            - secretRef:
+                name: tracey-api-env
+          readinessProbe:
+            httpGet: { path: /, port: health }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: health }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tracey-worker
+  namespace: production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tracey-worker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracey-ui
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tracey-ui
+  template:
+    metadata:
+      labels:
+        app: tracey-ui
+        app.kubernetes.io/part-of: tracey
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ui
+          image: tracey-ui:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8501
+          env:
+            - name: TRACEY_API_URL
+              value: "http://tracey-api-service:3000"
+            - name: HOME
+              value: /tmp
+          envFrom:
+            - secretRef:
+                name: tracey-ui-env
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracey-ui-service
+  namespace: production
+spec:
+  selector:
+    app: tracey-ui
+  ports:
+    - name: http
+      port: 8501
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tracey-ui
+  namespace: production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tracey-ui
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tracey-default-deny-ingress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: tracey
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tracey-ui-public-ingress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: tracey-ui
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8501 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tracey-api-ingress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: tracey-api
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: tracey-ui
+        - podSelector:
+            matchLabels:
+              app: tracey-worker
+      ports:
+        - { protocol: TCP, port: 3000 }
+    # The API service can be placed behind a cluster ingress or API gateway.
+    # Label that controller/gateway with access.tracey.ai/api-client: "true".
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              access.tracey.ai/api-client: "true"
+      ports:
+        - { protocol: TCP, port: 3000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tracey-executor-ingress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: tracey-executor
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: tracey-api
+      ports:
+        - { protocol: TCP, port: 3002 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tracey-collector-ingress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: otel-collector
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [tracey-api, tracey-executor]
+        # Independently deployed agents opt in by labeling their namespace.
+        # This does not grant Tracey Kubernetes read or mutation permissions.
+        - namespaceSelector:
+            matchLabels:
+              tracey.ai/telemetry-export: "enabled"
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }

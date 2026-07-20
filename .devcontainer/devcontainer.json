@@ -1,0 +1,41 @@
+{
+  "name": "Tracey Codespace Environment",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "enableNonRootDocker": "true",
+      "moby": "true"
+    }
+  },
+  "forwardPorts": [
+    8000,
+    3301,
+    8501,
+    3000,
+    5432
+  ],
+  "portsAttributes": {
+    "8000": {
+      "label": "Notes App",
+      "onAutoForward": "notify"
+    },
+    "3301": {
+      "label": "SigNoz UI",
+      "onAutoForward": "notify"
+    },
+    "8501": {
+      "label": "Tracey UI",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "bash scripts/setup-codespace.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "ms-kubernetes-tools.vscode-kubernetes-tools"
+      ]
+    }
+  }
+}

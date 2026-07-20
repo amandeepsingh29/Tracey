@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tracey-postgres
+  namespace: production
+spec:
+  serviceName: tracey-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: tracey-postgres }
+  template:
+    metadata:
+      labels: { app: tracey-postgres }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: initialize-volume-ownership
+          image: busybox:1.37.0
+          command: ["sh", "-c", "chown -R 999:999 /var/lib/postgresql/data /var/run/postgresql"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: runtime, mountPath: /var/run/postgresql }
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:0.8.2-pg17
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: POSTGRES_DB, value: tracey }
+            - { name: POSTGRES_USER, value: tracey }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: tracey-local-postgres, key: password } }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "tracey", "-d", "tracey"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: runtime, mountPath: /var/run/postgresql }
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: runtime
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracey-postgres
+  namespace: production
+spec:
+  clusterIP: None
+  selector: { app: tracey-postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }

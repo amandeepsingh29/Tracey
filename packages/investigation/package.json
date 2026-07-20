@@ -1,0 +1,34 @@
+{
+  "name": "@tracey/investigation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --conditions=development --import tsx --test 'src/**/*.test.ts'",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@tracey/codex-normalizer": "workspace:*",
+    "@tracey/cohort": "workspace:*",
+    "@tracey/diagnosis": "workspace:*",
+    "@tracey/domain": "workspace:*",
+    "@tracey/graph": "workspace:*",
+    "@tracey/signoz-adapter": "workspace:*",
+    "@tracey/telemetry": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@tracey/postgres-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --conditions=development --import tsx --test 'src/**/*.test.ts'",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@tracey/autonomy": "workspace:*",
+    "@tracey/domain": "workspace:*",
+    "pg": "^8.22.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.20.3"
+  }
+}

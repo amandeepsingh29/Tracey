@@ -1,0 +1,51 @@
+"use client";
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, MessageSquarePlus, Plus, Siren, UserRound } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
+import { useState, type FormEvent } from "react";
+import { Button, EmptyState, ErrorState, Field, LoadingState, Modal, PageHeader, Panel, SegmentedControl, StatusChip } from "../components/ui";
+import { api } from "../lib/api";
+import { dateTime, relativeTime, titleCase } from "../lib/format";
+import { usePersistedDraft } from "../lib/usePersistedDraft";
+import type { IncidentStatus } from "../types";
+
+export function IncidentsPage() {
+  const router = useRouter();
+  const client = useQueryClient();
+  const [status, setStatus] = useState("active");
+  const [creating, setCreating] = useState(false);
+  const query = useQuery({ queryKey: ["incidents"], queryFn: () => api.incidents(), refetchInterval: 15_000 });
+  const create = useMutation({ mutationFn: api.createIncident, onSuccess: async () => { setCreating(false); await client.invalidateQueries({ queryKey: ["incidents"] }); } });
+  const incidents = (query.data?.incidents ?? []).filter((incident) => status === "all" || (status === "active" ? !["resolved", "dismissed"].includes(incident.status) : incident.status === status));
+  const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const data = new FormData(event.currentTarget); create.mutate({ title: String(data.get("title")), summary: String(data.get("summary")), severity: String(data.get("severity")) as "info" | "warning" | "critical", environment: String(data.get("environment")), affectedAgentIds: [] }); };
+  return <div className="page"><PageHeader eyebrow="OPERATIONS INBOX" title="Incidents" description="Own, investigate, monitor, and resolve reliability events with a complete durable timeline." actions={<Button onClick={() => setCreating(true)}><Plus size={16} />Declare incident</Button>} />
+    <div className="filter-bar"><SegmentedControl label="Incident status" value={status} onChange={setStatus} options={[{ value: "active", label: "Active" }, { value: "all", label: "All" }, { value: "monitoring", label: "Monitoring" }, { value: "resolved", label: "Resolved" }]} /></div>
+    {query.isLoading ? <LoadingState /> : query.error ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : incidents.length === 0 ? <EmptyState icon={Siren} title="No incidents in this view" description="Failed runs and connector alerts can be promoted into incidents; operators can also declare one manually." /> : <div className="incident-list">{incidents.map((incident) => <button key={incident.incidentId} onClick={() => router.push(`/incidents/${incident.incidentId}`)}><span className={`incident-severity severity-${incident.severity}`} /><div><header><strong>{incident.title}</strong><StatusChip value={incident.status} /></header><p>{incident.summary}</p><footer><span>{titleCase(incident.severity)}</span><span>{incident.environment}</span><span>{incident.affectedAgentIds.length} agents</span><span>{relativeTime(incident.startedAt)}</span></footer></div></button>)}</div>}
+    <Modal open={creating} onClose={() => setCreating(false)} title="Declare an incident" description="Create a durable operational record. Tracey will not infer impact fields you do not provide."><form className="form-stack" onSubmit={submit}><div className="form-grid"><Field label="Title"><input name="title" required maxLength={200} /></Field><Field label="Severity"><select name="severity"><option value="warning">Warning</option><option value="critical">Critical</option><option value="info">Info</option></select></Field><Field label="Environment"><input name="environment" defaultValue="production" required /></Field></div><Field label="Observed impact"><textarea name="summary" required rows={4} /></Field>{create.error && <p className="form-error">{create.error.message}</p>}<div className="modal-actions"><Button variant="secondary" type="button" onClick={() => setCreating(false)}>Cancel</Button><Button disabled={create.isPending}>Create incident</Button></div></form></Modal>
+  </div>;
+}
+
+export function IncidentDetailPage() {
+  const { incidentId = "" } = useParams<{ incidentId: string }>();
+  const router = useRouter();
+  const client = useQueryClient();
+  const [note, setNote] = usePersistedDraft(`tracey.incident-note.${incidentId}`);
+  const query = useQuery({ queryKey: ["incident", incidentId], queryFn: () => api.incident(incidentId), refetchInterval: 10_000 });
+  const actions = useQuery({ queryKey: ["actions"], queryFn: () => api.actions() });
+  const linkedSessionId = query.data?.incident.investigationSessionId;
+  const evidenceMessages = useQuery({ queryKey: ["messages", linkedSessionId], queryFn: () => api.messages(linkedSessionId!), enabled: Boolean(linkedSessionId) });
+  const update = useMutation({ mutationFn: (input: { status?: IncidentStatus; owner?: string | null; note?: string; investigationSessionId?: string }) => api.updateIncident(incidentId, input), onSuccess: async () => { setNote(""); await Promise.all([client.invalidateQueries({ queryKey: ["incident", incidentId] }), client.invalidateQueries({ queryKey: ["incidents"] })]); } });
+  const investigate = useMutation({ mutationFn: async () => { const current = query.data!.incident; const session = await api.createInvestigation(`Incident: ${current.title}`); await api.updateIncident(incidentId, { status: "investigating", investigationSessionId: session.sessionId }); return session; }, onSuccess: (session) => router.push(`/investigations/${session.sessionId}`) });
+  if (query.isLoading) return <div className="page"><LoadingState /></div>;
+  if (query.error || !query.data) return <div className="page"><ErrorState error={query.error ?? new Error("Incident not found")} /></div>;
+  const { incident, events } = query.data;
+  const relatedChanges = (actions.data?.actions ?? []).filter((action) => action.sessionId === incident.investigationSessionId);
+  const evidence = (evidenceMessages.data?.messages ?? []).flatMap((message) => message.evidenceRefs);
+  return <div className="page"><button className="back-link" onClick={() => router.push("/incidents")}><ArrowLeft size={15} />All incidents</button><PageHeader eyebrow="INCIDENT COMMAND" title={incident.title} description={incident.summary} actions={<>{incident.investigationSessionId ? <Button onClick={() => router.push(`/investigations/${incident.investigationSessionId}`)}>Open investigation</Button> : <Button disabled={investigate.isPending} onClick={() => investigate.mutate()}>Start investigation</Button>}</>} />
+    <div className="change-hero"><div><span>Status</span><StatusChip value={incident.status} /></div><div><span>Severity</span><StatusChip value={incident.severity} /></div><div><span>Environment</span><strong>{incident.environment}</strong></div><div><span>Owner</span><strong>{incident.owner ?? "Unassigned"}</strong></div><div><span>Started</span><strong>{dateTime(incident.startedAt)}</strong></div></div>
+    <div className="two-column"><Panel title="Incident controls"><div className="incident-controls"><label>Status<select value={incident.status} onChange={(event) => update.mutate({ status: event.target.value as IncidentStatus })}>{["open", "investigating", "monitoring", "resolved", "dismissed"].map((value) => <option key={value} value={value}>{titleCase(value)}</option>)}</select></label><label>Owner<input defaultValue={incident.owner ?? ""} placeholder="operator@example.com" onBlur={(event) => event.target.value !== (incident.owner ?? "") && update.mutate({ owner: event.target.value || null })} /></label></div></Panel><Panel title="Affected agents"><div className="chip-list">{incident.affectedAgentIds.length ? incident.affectedAgentIds.map((id) => <button key={id} onClick={() => router.push(`/agents/${id}`)}><UserRound size={14} />{id}</button>) : <p>No affected agents have been linked yet.</p>}</div></Panel></div>
+    <div className="two-column"><Panel title="Correlated evidence" subtitle="Failed runs, logs, deployments, and infrastructure signals cited by the linked investigation.">{evidence.length ? <div className="evidence-list">{evidence.map((item, index) => <button key={`${item.traceId ?? item.sourceId ?? "evidence"}-${index}`} disabled={!item.traceId} onClick={() => item.traceId && router.push(`/runs/${item.traceId}`)}><code>{item.traceId ?? `${item.sourceType ?? "tool"} · ${item.sourceId ?? item.signal ?? "observation"}`}</code><span>{item.signal ?? item.sourceType ?? "trace"}</span>{item.observation && <p>{item.observation}</p>}</button>)}</div> : <EmptyState title="No correlated evidence yet" description="Start the investigation and ask Tracey to correlate agent runs, logs, deployments, and Kubernetes events." />}</Panel><Panel title="Linked changes" subtitle="Proposed and executed remediation from this incident investigation.">{relatedChanges.length ? <div className="related-list">{relatedChanges.map((action) => <button key={action.proposalId} onClick={() => router.push(`/changes/${action.proposalId}`)}><div><strong>{action.remediationPlan?.summary ?? action.actionType}</strong><code>{action.target}</code></div><StatusChip value={action.status} /></button>)}</div> : <EmptyState title="No changes linked" description="Evidence-backed proposals created in the investigation will appear here." />}</Panel></div>
+    <Panel title="Timeline" subtitle="Status, ownership, notes, investigations, and changes remain auditable."><div className="timeline">{events.map((event) => <div key={event.eventId}><span className="timeline-marker" /><div><header><strong>{titleCase(event.eventType)}</strong><time>{dateTime(event.createdAt)}</time></header><p>{event.actor}</p>{event.details.note ? <blockquote>{String(event.details.note)}</blockquote> : <pre>{JSON.stringify(event.details, null, 2)}</pre>}</div></div>)}</div><form className="incident-note" onSubmit={(event) => { event.preventDefault(); update.mutate({ note }); }}><MessageSquarePlus size={17} /><input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add an operational note…" required /><Button disabled={update.isPending || !note.trim()}>Add note</Button></form></Panel>
+  </div>;
+}

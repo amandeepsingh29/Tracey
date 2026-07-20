@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0",
+  "datasetId": "tracey-production-review-baseline-v1",
+  "deployment": "production-signoz",
+  "environment": "production",
+  "cases": [
+    { "caseId": "crm-timeout-retry-01", "scenario": "crm_timeout_retry", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "retry_recovery", "allowedCategories": ["retry_recovery", "tool_failure", "latency"] },
+    { "caseId": "empty-retrieval-01", "scenario": "empty_retrieval", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "retrieval_failure", "allowedCategories": ["retrieval_failure", "latency"] },
+    { "caseId": "wrong-tool-01", "scenario": "incorrect_tool_selection", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "tool_selection", "allowedCategories": ["tool_selection", "latency"] },
+    { "caseId": "provider-fallback-01", "scenario": "provider_fallback", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "provider_fallback", "allowedCategories": ["provider_fallback", "span_error", "latency"] },
+    { "caseId": "context-truncation-01", "scenario": "context_truncation", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "context_truncation", "allowedCategories": ["context_truncation", "latency"] },
+    { "caseId": "schema-mismatch-01", "scenario": "tool_schema_mismatch", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "schema_mismatch", "allowedCategories": ["schema_mismatch", "tool_failure", "latency"] },
+    { "caseId": "negative-feedback-01", "scenario": "negative_feedback", "traceId": "SET_LIVE_TRACE_ID", "start": 0, "end": 0, "primaryCategory": "negative_feedback", "allowedCategories": ["negative_feedback", "latency"] }
+  ]
+}

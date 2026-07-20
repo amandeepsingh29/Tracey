@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: production
+resources:
+  - ../../base
+labels:
+  - pairs:
+      tracey.ai/deployment-profile: production
+images:
+  - name: tracey-api
+    newName: registry.example.com/tracey/api
+    newTag: 0.1.0
+  - name: tracey-executor
+    newName: registry.example.com/tracey/executor
+    newTag: 0.1.0
+  - name: tracey-worker
+    newName: registry.example.com/tracey/worker
+    newTag: 0.1.0
+  - name: tracey-ui
+    newName: registry.example.com/tracey/ui
+    newTag: 0.1.0

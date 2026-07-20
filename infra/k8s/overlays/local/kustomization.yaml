@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: production
+resources:
+  - ../../base
+  - postgres.yaml
+  - network-policy.yaml
+labels:
+  - pairs:
+      tracey.ai/deployment-profile: local
+images:
+  - name: tracey-api
+    newName: tracey-api
+    newTag: 0.1.0
+  - name: tracey-executor
+    newName: tracey-executor
+    newTag: 0.1.0
+  - name: tracey-worker
+    newName: tracey-worker
+    newTag: 0.1.0
+  - name: tracey-ui
+    newName: tracey-ui
+    newTag: 0.1.0

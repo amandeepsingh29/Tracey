@@ -1,0 +1,23 @@
+{
+  "name": "@tracey/executor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --conditions=development --import tsx --test 'src/**/*.test.ts'",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@tracey/autonomy": "workspace:*",
+    "@tracey/cloud-adapter": "workspace:*",
+    "@tracey/postgres-store": "workspace:*",
+    "fastify": "^5.4.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3"
+  }
+}

@@ -1,0 +1,169 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: production
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 384
+        spike_limit_mib: 96
+      attributes/redact:
+        actions:
+          - { key: user.email, action: delete }
+          - { key: user.account_id, action: delete }
+          - { key: organization.id, action: delete }
+          - { key: prompt, action: delete }
+          - { key: output, action: delete }
+          - { key: arguments, action: delete }
+          - { key: result, action: delete }
+          - { key: command, action: delete }
+          - { key: full_command, action: delete }
+          - { key: tool_input, action: delete }
+          - { key: tool_parameters, action: delete }
+          - { key: request.body, action: delete }
+          - { key: response.body, action: delete }
+          - { key: http.request.header.authorization, action: delete }
+          - { key: http.request.header.cookie, action: delete }
+          - { key: gen_ai.input.messages, action: delete }
+          - { key: gen_ai.output.messages, action: delete }
+          - { key: gen_ai.system_instructions, action: delete }
+          - { key: gen_ai.tool.call.arguments, action: delete }
+          - { key: gen_ai.tool.call.result, action: delete }
+      transform/redact_logs:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - 'replace_pattern(body, "(?i)(authorization|bearer|token|api[-_]?key|password|secret|cookie)[=: ]+[^ ,;]+", "$1=[REDACTED]") where IsString(body)'
+      resource/scope:
+        attributes:
+          - { key: host.name, action: delete }
+          - { key: tracey.tenant.id, value: "${env:TRACEY_TENANT_ID}", action: upsert }
+          - { key: deployment.environment.name, value: "${env:DEPLOYMENT_ENVIRONMENT}", action: upsert }
+      batch:
+        send_batch_size: 512
+        timeout: 5s
+    exporters:
+      otlp_http/signoz:
+        endpoint: "${env:SIGNOZ_OTLP_ENDPOINT}"
+        headers:
+          signoz-ingestion-key: "${env:SIGNOZ_INGESTION_KEY}"
+        compression: gzip
+        timeout: 10s
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 1000
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/redact, resource/scope, batch]
+          exporters: [otlp_http/signoz]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/redact, resource/scope, batch]
+          exporters: [otlp_http/signoz]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/redact, transform/redact_logs, resource/scope, batch]
+          exporters: [otlp_http/signoz]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+        app.kubernetes.io/part-of: tracey
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.153.0
+          args: ["--config=/conf/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: grpc, containerPort: 4317 }
+            - { name: http, containerPort: 4318 }
+            - { name: health, containerPort: 13133 }
+          envFrom:
+            - secretRef:
+                name: signoz-secret
+          readinessProbe:
+            httpGet: { path: /, port: health }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: health }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: production
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - { name: grpc, port: 4317, targetPort: grpc }
+    - { name: http, port: 4318, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: otel-collector
+  namespace: production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: otel-collector
