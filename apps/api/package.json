@@ -28,8 +28,8 @@
     "@tracey/connectors": "workspace:*",
     "dotenv": "^17.2.1",
     "fastify": "^5.4.0",
-    "jose": "^6.2.3",
-    "zod": "^3.25.76"
+    "jose": "^6.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.20.3"

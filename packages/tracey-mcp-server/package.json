@@ -22,7 +22,7 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tracey/instrumentation": "workspace:*",
     "@tracey/investigation": "workspace:*",
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.20.3"

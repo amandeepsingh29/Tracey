@@ -21,7 +21,7 @@
     "@tracey/autonomy": "workspace:*",
     "@tracey/domain": "workspace:*",
     "pg": "^8.22.0",
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/pg": "^8.20.0",

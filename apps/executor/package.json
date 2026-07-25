@@ -15,7 +15,7 @@
     "@tracey/cloud-adapter": "workspace:*",
     "@tracey/postgres-store": "workspace:*",
     "fastify": "^5.4.0",
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.20.3"
