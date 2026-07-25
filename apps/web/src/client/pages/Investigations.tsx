@@ -2,8 +2,8 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, Bot, Download, History, MessageSquare, PanelRight, Plus, Send,
-  Sparkles, UserRound, X,
+  ArrowLeft, Bot, Check, ChevronDown, Download, History, MessageSquare, PanelRight,
+  Plus, Send, ShieldCheck, Sparkles, TriangleAlert, UserRound, X, Zap,
 } from "lucide-react";
 import Image from "next/image";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
@@ -16,6 +16,7 @@ import { ErrorState, LoadingState, StatusChip } from "../components/ui";
 import { api } from "../lib/api";
 import { dateTime, relativeTime } from "../lib/format";
 import { usePersistedDraft } from "../lib/usePersistedDraft";
+import type { AutonomyPolicy } from "../types";
 
 const starterPrompts = [
   {
@@ -35,6 +36,74 @@ const starterPrompts = [
 function conversationTitle(prompt: string): string {
   const compact = prompt.replace(/\s+/g, " ").trim();
   return compact.length > 72 ? `${compact.slice(0, 69)}…` : compact;
+}
+
+const modeDescriptions: Record<AutonomyPolicy["mode"], string> = {
+  observe: "Investigate only. No change proposals or execution.",
+  recommend: "Recommend changes without executing them.",
+  approval: "Every infrastructure change waits for human approval.",
+  guarded_autopilot: "Only allowlisted automatic actions may run within policy limits.",
+  full_autopilot: "Allowlisted actions may run automatically across the configured scope.",
+};
+
+const modeLabels: Record<AutonomyPolicy["mode"], string> = {
+  observe: "Observe",
+  recommend: "Recommend",
+  approval: "Approval",
+  guarded_autopilot: "Guarded autopilot",
+  full_autopilot: "Full autopilot",
+};
+
+function PolicyModeControl() {
+  const client = useQueryClient();
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const [pendingMode, setPendingMode] = useState<AutonomyPolicy["mode"] | null>(null);
+  const query = useQuery({ queryKey: ["policies"], queryFn: api.policies });
+  const record = query.data?.policies.find((item) => item.scopeType === "global" && item.scopeId === "default");
+  const mode = record?.policy.mode;
+  const save = useMutation({
+    mutationFn: (nextMode: AutonomyPolicy["mode"]) => {
+      if (!record) throw new Error("No global autonomy policy is configured.");
+      return api.savePolicy("global", "default", { ...record.policy, mode: nextMode });
+    },
+    onSuccess: async () => {
+      setPendingMode(null);
+      detailsRef.current?.removeAttribute("open");
+      await client.invalidateQueries({ queryKey: ["policies"] });
+    },
+  });
+  const chooseMode = (nextMode: AutonomyPolicy["mode"]) => {
+    if (nextMode === mode) {
+      detailsRef.current?.removeAttribute("open");
+      return;
+    }
+    if (nextMode === "guarded_autopilot" || nextMode === "full_autopilot") {
+      setPendingMode(nextMode);
+      return;
+    }
+    save.mutate(nextMode);
+  };
+
+  return <details className="composer-mode-control" ref={detailsRef}>
+    <summary aria-label={`Tracey mode: ${mode ? modeLabels[mode] : "unavailable"}`}>
+      {mode === "guarded_autopilot" || mode === "full_autopilot" ? <Zap /> : <ShieldCheck />}
+      <span>{query.isLoading ? "Loading mode" : mode ? modeLabels[mode] : "Mode unavailable"}</span>
+      <ChevronDown />
+    </summary>
+    <div className="composer-mode-menu">
+      <header><strong>Tracey mode</strong><span>Controls how evidence can become action.</span></header>
+      {pendingMode ? <div className="mode-confirmation">
+        <TriangleAlert />
+        <div><strong>Enable {modeLabels[pendingMode]}?</strong><p>{modeDescriptions[pendingMode]} Existing scopes, action allowlists, and risk limits remain enforced.</p></div>
+        <footer><button type="button" onClick={() => setPendingMode(null)}>Cancel</button><button type="button" className="mode-confirm-button" disabled={save.isPending} onClick={() => save.mutate(pendingMode)}>{save.isPending ? "Saving…" : "Enable mode"}</button></footer>
+      </div> : <div className="composer-mode-options">{(Object.keys(modeLabels) as AutonomyPolicy["mode"][]).map((item) => <button type="button" key={item} className={item === mode ? "active" : ""} disabled={!record || save.isPending} onClick={() => chooseMode(item)}>
+        <span>{item === "guarded_autopilot" || item === "full_autopilot" ? <Zap /> : <ShieldCheck />}</span>
+        <div><strong>{modeLabels[item]}</strong><small>{modeDescriptions[item]}</small></div>
+        {item === mode && <Check />}
+      </button>)}</div>}
+      {save.error && <p className="composer-mode-error">{save.error.message}</p>}
+    </div>
+  </details>;
 }
 
 export function InvestigationsPage() {
@@ -80,7 +149,6 @@ export function InvestigationsPage() {
         <div className="tracey-orb" aria-hidden="true"><Image src="/crumbles-logo.png" alt="" width={48} height={49} priority /></div>
         <p className="chat-kicker">AI RELIABILITY INVESTIGATOR</p>
         <h1>What should we investigate?</h1>
-        <p className="chat-home-copy">Ask about an agent, run, trace, Codex conversation, Kubernetes workload, or production symptom. Tracey will use connected tools and keep evidence attached.</p>
         <form className="chat-start-composer" onSubmit={submit}>
           <textarea
             autoFocus
@@ -98,7 +166,7 @@ export function InvestigationsPage() {
             aria-label="Start a Tracey investigation"
             disabled={create.isPending}
           />
-          <footer><span>Tracey can make mistakes. Verify critical changes before approval.</span><button aria-label="Start investigation" disabled={create.isPending || !draft.trim()}><Send /></button></footer>
+          <footer><PolicyModeControl /><span>Tracey can make mistakes. Verify critical changes before approval.</span><button aria-label="Start investigation" disabled={create.isPending || !draft.trim()}><Send /></button></footer>
         </form>
         {create.error && <p className="composer-error" role="alert">{create.error.message}</p>}
         <div className="chat-suggestions">{starterPrompts.map((item) => <button key={item.label} onClick={() => startConversation(item.prompt)} disabled={create.isPending}><Sparkles /><span>{item.label}</span></button>)}</div>
@@ -120,7 +188,7 @@ export function InvestigationDetailPage() {
   const [messageDraft, setMessageDraft] = usePersistedDraft(`tracey.investigation-draft.${sessionId}`);
   const sessions = useQuery({ queryKey: ["investigations"], queryFn: api.investigations });
   const messages = useQuery({ queryKey: ["messages", sessionId], queryFn: () => api.messages(sessionId), refetchInterval: 15_000 });
-  const actions = useQuery({ queryKey: ["actions"], queryFn: () => api.actions() });
+  const actions = useQuery({ queryKey: ["actions"], queryFn: () => api.actions(), refetchInterval: 5_000 });
   const send = useMutation({
     mutationFn: (content: string) => api.chat(sessionId, content),
     onSuccess: async () => {
@@ -141,6 +209,7 @@ export function InvestigationDetailPage() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages.data?.messages.length, send.isPending]);
   const session = sessions.data?.investigations.find((item) => item.sessionId === sessionId);
   const relatedActions = actions.data?.actions.filter((action) => action.sessionId === sessionId) ?? [];
+  const pendingAction = relatedActions.find((action) => action.status === "awaiting_approval");
   const assistantMessages = messages.data?.messages.filter((message) => message.role === "assistant") ?? [];
   const latestAssistant = assistantMessages.at(-1);
   const evidence = assistantMessages.flatMap((message) => message.evidenceRefs);
@@ -156,6 +225,28 @@ export function InvestigationDetailPage() {
       event.currentTarget.form?.requestSubmit();
     }
   };
+  const approve = useMutation({
+    mutationFn: async (proposalId: string) => {
+      await api.decideAction(proposalId, "approved");
+      return api.executeAction(proposalId);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["actions"] }),
+        client.invalidateQueries({ queryKey: ["messages", sessionId] }),
+        client.invalidateQueries({ queryKey: ["notifications"] }),
+      ]);
+    },
+  });
+  const reject = useMutation({
+    mutationFn: (proposalId: string) => api.decideAction(proposalId, "rejected"),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["actions"] }),
+        client.invalidateQueries({ queryKey: ["notifications"] }),
+      ]);
+    },
+  });
   const exportReport = () => {
     const lines = [
       `# ${session?.title ?? "Tracey investigation"}`, "", `Exported: ${new Date().toISOString()}`, "",
@@ -211,6 +302,19 @@ export function InvestigationDetailPage() {
       </div>
 
       <div className="chat-composer-dock">
+        {pendingAction && <section className="composer-approval-card" aria-live="polite">
+          <div className="approval-card-icon"><ShieldCheck /></div>
+          <div className="approval-card-copy">
+            <header><span>Approval required</span><code>{pendingAction.proposalId.slice(0, 8)}</code></header>
+            <strong>{pendingAction.remediationPlan?.summary ?? `${pendingAction.actionType} ${pendingAction.target}`}</strong>
+            <p>{pendingAction.target} · {pendingAction.risk} risk{pendingAction.remediationPlan?.expectedImpact ? ` · ${pendingAction.remediationPlan.expectedImpact}` : ""}</p>
+          </div>
+          <div className="approval-card-actions">
+            <button className="approval-reject" disabled={approve.isPending || reject.isPending} onClick={() => reject.mutate(pendingAction.proposalId)}><X />Reject</button>
+            <button className="approval-accept" disabled={approve.isPending || reject.isPending} onClick={() => approve.mutate(pendingAction.proposalId)}><Check />{approve.isPending ? "Executing…" : "Approve & run"}</button>
+          </div>
+        </section>}
+        {(approve.error || reject.error) && <p className="approval-error" role="alert">{(approve.error ?? reject.error)?.message}</p>}
         <form className="chatgpt-composer" onSubmit={submit}>
           <textarea
             name="content"
@@ -223,6 +327,7 @@ export function InvestigationDetailPage() {
             aria-label="Message Tracey"
             disabled={send.isPending}
           />
+          <PolicyModeControl />
           <button aria-label="Send message" disabled={send.isPending || !messageDraft.trim()}><Send /></button>
         </form>
         <p>Enter to send · Shift + Enter for a new line · Changes always require policy evaluation</p>

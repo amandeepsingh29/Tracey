@@ -820,7 +820,7 @@ code { color: #0369a1; }
 
 .chat-start-composer {
   margin-top: 30px;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   background: #fffdf8;
@@ -850,7 +850,7 @@ code { color: #0369a1; }
   line-height: 1.55;
 }
 
-.chat-start-composer footer {
+.chat-start-composer > footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -858,12 +858,16 @@ code { color: #0369a1; }
   padding: 8px 12px 12px 20px;
 }
 
-.chat-start-composer footer span {
+.chat-start-composer > footer > span {
+  flex: 1;
+}
+
+.chat-start-composer > footer > span {
   color: var(--subtle);
   font-size: 10px;
 }
 
-.chat-start-composer footer button,
+.chat-start-composer > footer > button,
 .chatgpt-composer > button {
   display: grid;
   width: 38px;
@@ -878,19 +882,19 @@ code { color: #0369a1; }
   transition: transform .16s ease, background .16s ease;
 }
 
-.chat-start-composer footer button:hover:not(:disabled),
+.chat-start-composer > footer > button:hover:not(:disabled),
 .chatgpt-composer > button:hover:not(:disabled) {
   transform: translateY(-1px);
   background: var(--accent-strong);
 }
 
-.chat-start-composer footer button:disabled,
+.chat-start-composer > footer > button:disabled,
 .chatgpt-composer > button:disabled {
   opacity: .32;
   cursor: default;
 }
 
-.chat-start-composer svg,
+.chat-start-composer > footer > button svg,
 .chatgpt-composer > button svg {
   width: 17px;
   height: 17px;
@@ -1348,6 +1352,7 @@ code { color: #0369a1; }
 }
 
 .chatgpt-composer {
+  position: relative;
   display: flex;
   width: min(840px, 100%);
   min-height: 58px;
@@ -1360,6 +1365,323 @@ code { color: #0369a1; }
   background: #fff;
   box-shadow: 0 7px 24px rgba(15, 23, 42, .07);
   transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+.composer-mode-control {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.composer-mode-control > summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 750;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+
+.composer-mode-control > summary::-webkit-details-marker {
+  display: none;
+}
+
+.composer-mode-control > summary:hover,
+.composer-mode-control[open] > summary {
+  border-color: var(--border);
+  background: #f5f1e8;
+  color: var(--text);
+}
+
+.composer-mode-control > summary svg:first-child {
+  width: 15px;
+  height: 15px;
+  color: #d85f22;
+}
+
+.composer-mode-control > summary svg:last-child {
+  width: 13px;
+  height: 13px;
+  transition: transform .16s ease;
+}
+
+.composer-mode-control[open] > summary svg:last-child {
+  transform: rotate(180deg);
+}
+
+.composer-mode-menu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: min(390px, calc(100vw - 40px));
+  padding: 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: #fffdf8;
+  box-shadow: 0 18px 55px rgba(15, 23, 42, .17);
+}
+
+.composer-mode-menu > header {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.composer-mode-menu > header strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.composer-mode-menu > header span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.composer-mode-options {
+  display: grid;
+  gap: 3px;
+  padding-top: 7px;
+}
+
+.composer-mode-options > button {
+  display: grid;
+  grid-template-columns: 30px 1fr 18px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-mode-options > button:hover,
+.composer-mode-options > button.active {
+  background: #f2eee5;
+}
+
+.composer-mode-options > button:disabled {
+  cursor: default;
+}
+
+.composer-mode-options > button > span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  color: #d85f22;
+}
+
+.composer-mode-options > button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-mode-options > button > div {
+  display: grid;
+  gap: 2px;
+}
+
+.composer-mode-options strong {
+  font-size: 11px;
+}
+
+.composer-mode-options small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.composer-mode-options > button > svg {
+  color: #15803d;
+}
+
+.mode-confirmation {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px;
+  padding: 12px 8px 5px;
+}
+
+.mode-confirmation > svg {
+  width: 18px;
+  height: 18px;
+  color: #d85f22;
+}
+
+.mode-confirmation p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.mode-confirmation footer {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 6px;
+  padding: 0;
+}
+
+.mode-confirmation footer button {
+  min-height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.mode-confirmation footer .mode-confirm-button {
+  border-color: #d85f22;
+  background: #d85f22;
+  color: #fff;
+}
+
+.composer-mode-error {
+  margin: 7px 8px 2px;
+  color: #b42318;
+  font-size: 10px;
+}
+
+.composer-approval-card {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: min(840px, 100%);
+  margin: 0 auto 10px;
+  padding: 11px 12px;
+  border: 1px solid #efb48f;
+  border-radius: 12px;
+  background: #fff8f1;
+  box-shadow: 0 9px 28px rgba(134, 62, 25, .1);
+  animation: approval-enter .18s ease-out;
+}
+
+@keyframes approval-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.approval-card-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 9px;
+  background: #fbe3d3;
+  color: #c24b13;
+}
+
+.approval-card-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.approval-card-copy {
+  min-width: 0;
+}
+
+.approval-card-copy header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 3px;
+}
+
+.approval-card-copy header span {
+  color: #b54708;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.approval-card-copy header code {
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.approval-card-copy > strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-card-copy > p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-card-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.approval-card-actions button {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.approval-card-actions button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.approval-card-actions .approval-accept {
+  border-color: #111827;
+  background: #111827;
+  color: #fff;
+}
+
+.approval-card-actions button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.approval-error {
+  width: min(840px, 100%);
+  margin: 0 auto 8px;
+  color: #b42318;
+  font-size: 10px;
 }
 
 .chatgpt-composer textarea {
@@ -1651,11 +1973,11 @@ code { color: #0369a1; }
     padding: 16px 16px 8px;
   }
 
-  .chat-start-composer footer {
+  .chat-start-composer > footer {
     padding: 7px 10px 10px 16px;
   }
 
-  .chat-start-composer footer span {
+  .chat-start-composer > footer > span {
     display: none;
   }
 
@@ -1729,6 +2051,30 @@ code { color: #0369a1; }
   .chatgpt-composer > button {
     width: 36px;
     height: 36px;
+  }
+
+  .composer-mode-control > summary {
+    padding: 0 7px;
+  }
+
+  .composer-mode-control > summary svg:last-child {
+    display: none;
+  }
+
+  .composer-approval-card {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 9px;
+    padding: 10px;
+  }
+
+  .approval-card-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .approval-card-actions button {
+    flex: 1;
+    justify-content: center;
   }
 
   .chat-composer-dock > p {

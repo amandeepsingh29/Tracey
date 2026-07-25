@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { InvestigationService } from "@tracey/investigation";
 import type { InvestigationMessage, PostgresStore } from "@tracey/postgres-store";
 import type { AutonomyService } from "./autonomy-service.js";
-import { AgenticInvestigator, agentToolNames, collectCitableEvidence, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
+import { AgenticInvestigator, agentToolNames, collectCitableEvidence, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
 
 describe("bounded agentic investigator", () => {
   it("exposes remediation planning but no direct mutation adapter tools", () => {
@@ -20,7 +20,23 @@ describe("bounded agentic investigator", () => {
   it("recognizes incomplete promises that must not end an investigation", () => {
     assert.equal(isIncompleteActionPromise("Please hold on while I check each agent."), true);
     assert.equal(isIncompleteActionPromise("Let me try again to gather the information."), true);
+    assert.equal(isIncompleteActionPromise("Please confirm if you would like to proceed."), true);
     assert.equal(isIncompleteActionPromise("Two agents failed and one source was unavailable."), false);
+  });
+
+  it("recognizes only concise, explicit action confirmations", () => {
+    assert.equal(isExplicitActionConfirmation("yes proceed"), true);
+    assert.equal(isExplicitActionConfirmation("Approve and execute"), true);
+    assert.equal(isExplicitActionConfirmation("do it."), true);
+    assert.equal(isExplicitActionConfirmation("yes, investigate the logs first"), false);
+  });
+
+  it("recognizes explicit infrastructure mutation requests", () => {
+    assert.equal(isExplicitMutationRequest("restart pod coredns-123"), true);
+    assert.equal(isExplicitMutationRequest("Please roll back checkout-api"), true);
+    assert.equal(isExplicitMutationRequest("Could you scale the worker deployment?"), true);
+    assert.equal(isExplicitMutationRequest("Why did the pod restart?"), false);
+    assert.equal(isExplicitMutationRequest("Investigate the readiness failures"), false);
   });
 
   it("redacts credentials and personal identifiers from logs before OpenRouter", () => {
@@ -141,6 +157,21 @@ describe("bounded agentic investigator", () => {
     });
     assert.equal(evidence[0]?.signal, "tracey.application.status");
     assert.match(evidence[0]?.observation ?? "", /1 registry match.*0 matching pods/);
+  });
+
+  it("creates citable evidence for a durable remediation proposal", () => {
+    const proposalId = crypto.randomUUID();
+    const evidence = collectCitableEvidence("propose_remediation", {}, {
+      action: {
+        proposalId,
+        target: "kube-system/coredns-589f44dc88-rvsm8",
+        status: "awaiting_approval",
+      },
+      decision: { decision: "require_approval" },
+    });
+    assert.equal(evidence[0]?.sourceType, "tracey");
+    assert.equal(evidence[0]?.sourceId, `action:${proposalId}`);
+    assert.match(evidence[0]?.observation ?? "", /awaiting_approval/);
   });
 
   it("resolves relative Codex windows deterministically in epoch milliseconds", () => {
@@ -350,9 +381,15 @@ describe("bounded agentic investigator", () => {
       },
     } as unknown as AutonomyService;
     let call = 0;
-    context.mock.method(globalThis, "fetch", async () => {
+    context.mock.method(globalThis, "fetch", async (_input: string | URL | Request, init?: RequestInit) => {
       call += 1;
+      if (call === 2) {
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ content?: string }> };
+        assert.match(body.messages.at(-1)?.content ?? "", /explicitly requested an infrastructure change/i);
+      }
       return new Response(JSON.stringify(call === 1 ? {
+        choices: [{ message: { role: "assistant", content: "The workload may benefit from a restart. Would you like to proceed with an action?" } }],
+      } : call === 2 ? {
         choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "plan-1", type: "function", function: {
           name: "propose_remediation", arguments: JSON.stringify({
             action: { type: "restart_workload", namespace: "production", workload: "sample-workload" },
@@ -364,8 +401,92 @@ describe("bounded agentic investigator", () => {
       } : { choices: [{ message: { role: "assistant", content: "Plan recorded for approval." } }] }), { status: 200, headers: { "content-type": "application/json" } });
     });
     const agent = new AgenticInvestigator({ apiKey: "test", model: "test-model", tenantId: "tenant-a", environment: "test" }, {} as InvestigationService, store, autonomy);
-    const result = await agent.chat(crypto.randomUUID(), "Fix the outage", { subject: "analyst-a", roles: ["analyst"] });
+    const result = await agent.chat(crypto.randomUUID(), "Restart sample-workload", { subject: "analyst-a", roles: ["analyst"] });
     assert.equal(evaluated, true);
+    assert.equal(call, 3);
     assert.equal(result.content, "Plan recorded for approval.");
+  });
+
+  it("executes the latest pending action after explicit administrator confirmation without another model call", async (context) => {
+    const messages: InvestigationMessage[] = [];
+    const pending = {
+      proposalId: crypto.randomUUID(),
+      sessionId: crypto.randomUUID(),
+      actionType: "restart" as const,
+      target: "kube-system/coredns-589f44dc88-rvsm8",
+      reason: "Administrator requested a restart",
+      parameters: { type: "restart_pod", namespace: "kube-system", workload: "coredns-589f44dc88-rvsm8" },
+      risk: "low" as const,
+      status: "awaiting_approval" as const,
+      proposedBy: "admin-a",
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    let approved = false;
+    let audited = false;
+    const store = {
+      appendInvestigationMessage: async (_tenantId: string, input: Omit<InvestigationMessage, "messageId" | "createdAt">) => {
+        const saved = { ...input, messageId: crypto.randomUUID(), evidenceRefs: input.evidenceRefs ?? [], createdAt: new Date().toISOString() } as InvestigationMessage;
+        messages.push(saved);
+        return saved;
+      },
+      getLatestPendingActionProposal: async () => pending,
+      decideActionProposal: async () => {
+        approved = true;
+        return { ...pending, status: "approved" as const, approvedBy: "admin-a" };
+      },
+      recordAgentToolAudit: async () => { audited = true; },
+    } as unknown as PostgresStore;
+    const autonomy = {
+      execute: async () => ({ ...pending, status: "succeeded" as const, approvedBy: "admin-a" }),
+    } as unknown as AutonomyService;
+    context.mock.method(globalThis, "fetch", async () => {
+      throw new Error("OpenRouter must not be called for a pending action confirmation");
+    });
+    const agent = new AgenticInvestigator({
+      apiKey: "test", model: "test-model", tenantId: "tenant-a", environment: "test",
+    }, {} as InvestigationService, store, autonomy);
+
+    const result = await agent.chat(pending.sessionId, "yes proceed", { subject: "admin-a", roles: ["admin"] });
+
+    assert.equal(approved, true);
+    assert.equal(audited, true);
+    assert.equal(result.grounding, "evidence_bound");
+    assert.equal(result.toolCallCount, 1);
+    assert.match(result.content, /completed successfully/i);
+    assert.equal((result.evidenceRefs[0] as { sourceId: string }).sourceId, `action:${pending.proposalId}`);
+  });
+
+  it("does not execute a pending action when confirmation is not from an administrator", async () => {
+    const messages: InvestigationMessage[] = [];
+    const pending = {
+      proposalId: crypto.randomUUID(),
+      sessionId: crypto.randomUUID(),
+      actionType: "restart" as const,
+      target: "production/sample-api",
+      reason: "Restart requested",
+      parameters: {},
+      risk: "low" as const,
+      status: "awaiting_approval" as const,
+      proposedBy: "analyst-a",
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    const store = {
+      appendInvestigationMessage: async (_tenantId: string, input: Omit<InvestigationMessage, "messageId" | "createdAt">) => {
+        const saved = { ...input, messageId: crypto.randomUUID(), evidenceRefs: input.evidenceRefs ?? [], createdAt: new Date().toISOString() } as InvestigationMessage;
+        messages.push(saved);
+        return saved;
+      },
+      getLatestPendingActionProposal: async () => pending,
+    } as unknown as PostgresStore;
+    const agent = new AgenticInvestigator({
+      apiKey: "test", model: "test-model", tenantId: "tenant-a", environment: "test",
+    }, {} as InvestigationService, store, {} as AutonomyService);
+
+    const result = await agent.chat(pending.sessionId, "confirm", { subject: "analyst-a", roles: ["analyst"] });
+
+    assert.match(result.content, /requires an administrator/i);
+    assert.equal(result.grounding, "evidence_bound");
   });
 });

@@ -33,6 +33,7 @@ import { ApprovedActionExecutor } from "./action-executor.js";
 import { AutonomyService } from "./autonomy-service.js";
 import { notificationsUiHtml } from "./notifications-ui.js";
 import { ConnectorSecretVault } from "./connector-secrets.js";
+import { agentRunsToExecutions, codexLogsToExecutions, type ObservedExecution } from "./execution-feed.js";
 
 export function buildServer(config: AppConfig) {
   const server = Fastify({
@@ -204,9 +205,42 @@ export function buildServer(config: AppConfig) {
   };
 
   server.addHook("onReady", async () => {
-    if (!store || !connectorVault) return;
-    const records = await store.listConnectorConfigs(config.TRACEY_TENANT_ID);
-    for (const record of records) { try { applyStoredConnector(record); } catch (error) { server.log.error({ err: error, connectorId: record.connectorId }, "Stored connector could not be activated"); } }
+    if (!store) return;
+    if (connectorVault) {
+      const records = await store.listConnectorConfigs(config.TRACEY_TENANT_ID);
+      for (const record of records) { try { applyStoredConnector(record); } catch (error) { server.log.error({ err: error, connectorId: record.connectorId }, "Stored connector could not be activated"); } }
+    }
+    const existingPolicy = await store.getAutonomyPolicy(config.TRACEY_TENANT_ID, "global", "default");
+    if (!existingPolicy) {
+      await store.upsertAutonomyPolicy(config.TRACEY_TENANT_ID, {
+        scopeType: "global",
+        scopeId: "default",
+        enabled: true,
+        actor: "tracey-bootstrap",
+        policy: AutonomyPolicySchema.parse({
+          mode: "approval",
+          environments: [config.DEPLOYMENT_ENVIRONMENT],
+          namespaces: kubernetesRuntime.allowedNamespaces.length > 0 ? kubernetesRuntime.allowedNamespaces : ["tracey-unconfigured"],
+          workloads: kubernetesRuntime.allowedWorkloads.length > 0 ? kubernetesRuntime.allowedWorkloads : ["tracey-unconfigured"],
+          allowedActions: [
+            "restart_pod", "restart_workload", "rollback_deployment", "scale_deployment",
+            "update_resource_limits", "update_hpa", "retry_job", "suspend_cronjob",
+            "resume_cronjob", "apply_config_patch", "restore_previous_config",
+            "apply_kubernetes_resource", "patch_kubernetes_resource", "delete_kubernetes_resource",
+          ],
+          automaticActions: [],
+          prohibitedActions: ["read_secrets", "delete_namespace", "delete_database", "arbitrary_shell"],
+          minimumConfidence: 0.8,
+          maximumAutomaticRisk: "low",
+          maxReplicas: 20,
+          maxAffectedWorkloads: 5,
+          maxUnavailableReplicas: 1,
+          maxConcurrentActions: 2,
+          cooldownMinutes: 5,
+        }),
+      });
+      server.log.info("Created the default approval-required autonomy policy");
+    }
   });
 
   server.addHook("onClose", async () => {
@@ -842,6 +876,169 @@ export function buildServer(config: AppConfig) {
       request.log.error({ err: error }, "Agent registry query failed");
       return reply.code(503).send({ error: "The production agent registry is unavailable" });
     }
+  });
+
+  server.get("/v1/executions", { preHandler: apiAuth }, async (request, reply) => {
+    if (!investigations) {
+      return reply.code(503).send({
+        error: "SIGNOZ_API_URL and SIGNOZ_API_KEY are required for the observed execution feed",
+      });
+    }
+    const query = request.query as Record<string, unknown>;
+    const parsed = z.object({
+      start: z.coerce.number().int().nonnegative(),
+      end: z.coerce.number().int().positive(),
+      limit: z.coerce.number().int().min(1).max(500).default(200),
+    }).refine(({ start, end }) => start < end && end - start <= 7 * 86_400_000, "time range must be between one millisecond and seven days").safeParse(query);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid execution feed query", issues: parsed.error.issues });
+
+    const registered = store ? (await store.listAgents(config.TRACEY_TENANT_ID, 100)).filter(({ status }) => status === "active") : [];
+    type SourceResult = {
+      source: {
+        sourceId: string;
+        displayName: string;
+        serviceName?: string;
+        producerType: string;
+        status: "complete" | "empty" | "unavailable" | "not_registered";
+        observedExecutions: number;
+        limitation?: string;
+      };
+      executions: ObservedExecution[];
+    };
+    const codexSources = [
+      { serviceName: "codex-app-server" as const, displayName: "Codex App Server" },
+      { serviceName: "Codex Desktop" as const, displayName: "Codex Desktop" },
+    ];
+    const codexTasks = codexSources.map(async ({ serviceName, displayName }): Promise<SourceResult> => {
+      try {
+        const result = await investigations!.getCodexRecentLogs({
+          serviceName,
+          start: parsed.data.start,
+          end: parsed.data.end,
+          limit: Math.min(parsed.data.limit * 20, 5_000),
+        });
+        const executions = codexLogsToExecutions({
+          logs: result.logs,
+          serviceName,
+          producerName: displayName,
+          environment: config.DEPLOYMENT_ENVIRONMENT,
+        });
+        return {
+          source: {
+            sourceId: `codex:${serviceName}`,
+            displayName,
+            serviceName,
+            producerType: "codex_desktop",
+            status: executions.length > 0 ? "complete" : "empty",
+            observedExecutions: executions.length,
+          },
+          executions,
+        };
+      } catch {
+        return {
+          source: {
+            sourceId: `codex:${serviceName}`,
+            displayName,
+            serviceName,
+            producerType: "codex_desktop",
+            status: "unavailable",
+            observedExecutions: 0,
+            limitation: "The bounded SigNoz query for this Codex source failed.",
+          },
+          executions: [],
+        };
+      }
+    });
+    const agentTasks = registered
+      .filter(({ producerType }) => !["codex_desktop", "codex_cli"].includes(producerType))
+      .map(async (agent): Promise<SourceResult> => {
+        if (agent.environment !== config.DEPLOYMENT_ENVIRONMENT) {
+          return {
+            source: {
+              sourceId: `agent:${agent.agentId}`,
+              displayName: agent.displayName,
+              serviceName: agent.serviceName,
+              producerType: agent.producerType,
+              status: "unavailable",
+              observedExecutions: 0,
+              limitation: "The registered environment is outside the configured SigNoz scope.",
+            },
+            executions: [],
+          };
+        }
+        try {
+          const result = await investigations!.searchAgentRuns({
+            start: parsed.data.start,
+            end: parsed.data.end,
+            serviceName: agent.serviceName,
+            limit: parsed.data.limit,
+            offset: 0,
+          }, agent.producerType);
+          const executions = agentRunsToExecutions({
+            runs: result.runs,
+            producerType: agent.producerType,
+            producerName: agent.displayName,
+            serviceName: agent.serviceName,
+            environment: agent.environment,
+          });
+          return {
+            source: {
+              sourceId: `agent:${agent.agentId}`,
+              displayName: agent.displayName,
+              serviceName: agent.serviceName,
+              producerType: agent.producerType,
+              status: executions.length > 0 ? "complete" : "empty",
+              observedExecutions: executions.length,
+            },
+            executions,
+          };
+        } catch {
+          return {
+            source: {
+              sourceId: `agent:${agent.agentId}`,
+              displayName: agent.displayName,
+              serviceName: agent.serviceName,
+              producerType: agent.producerType,
+              status: "unavailable",
+              observedExecutions: 0,
+              limitation: "The bounded SigNoz run query for this registered agent failed.",
+            },
+            executions: [],
+          };
+        }
+      });
+    const results = await Promise.all([...codexTasks, ...agentTasks]);
+    const sourceStatuses = results.map(({ source }) => source);
+    if (!registered.some(({ producerType }) => producerType === "claude_code")) {
+      sourceStatuses.push({
+        sourceId: "producer:claude_code",
+        displayName: "Claude Code",
+        producerType: "claude_code",
+        status: "not_registered",
+        observedExecutions: 0,
+        limitation: "Register a Claude Code producer to query its observed interaction roots.",
+      });
+    }
+    if (!registered.some(({ producerType }) => producerType === "custom_otel")) {
+      sourceStatuses.push({
+        sourceId: "producer:custom_otel",
+        displayName: "Custom OpenTelemetry agents",
+        producerType: "custom_otel",
+        status: "not_registered",
+        observedExecutions: 0,
+        limitation: "Register a custom agent service to query its observed agent.run roots.",
+      });
+    }
+    const executions = results.flatMap(({ executions: items }) => items)
+      .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
+      .slice(0, parsed.data.limit);
+    return {
+      executions,
+      sources: sourceStatuses,
+      window: { start: parsed.data.start, end: parsed.data.end },
+      registeredAgentCount: registered.length,
+      truncated: results.some(({ executions: items }) => items.length >= parsed.data.limit) || executions.length >= parsed.data.limit,
+    };
   });
 
   server.get("/v1/agents/:agentId/runs", { preHandler: apiAuth }, async (request, reply) => {

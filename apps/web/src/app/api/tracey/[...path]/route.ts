@@ -5,7 +5,10 @@ const methodsWithBody = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
-  const baseUrl = (process.env.TRACEY_API_URL ?? "http://tracey-api-service:3000").replace(/\/$/, "");
+  // Kubernetes and other deployments set TRACEY_API_URL explicitly. Falling
+  // back to loopback keeps a local production build connected after restart.
+  const baseUrl = (process.env.TRACEY_API_URL ?? "http://127.0.0.1:3000").replace(/\/$/, "");
+  const accessToken = process.env.TRACEY_UI_ACCESS_TOKEN ?? process.env.TRACEY_API_BEARER_TOKEN;
   const target = new URL(`${baseUrl}/${path.join("/")}`);
   request.nextUrl.searchParams.forEach((value, key) => target.searchParams.append(key, value));
   const controller = new AbortController();
@@ -23,7 +26,7 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
       headers: {
         accept: request.headers.get("accept") ?? "application/json",
         ...(hasBody ? { "content-type": request.headers.get("content-type") ?? "application/json" } : {}),
-        ...(process.env.TRACEY_UI_ACCESS_TOKEN ? { authorization: `Bearer ${process.env.TRACEY_UI_ACCESS_TOKEN}` } : {}),
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
       },
       ...(hasBody ? { body } : {}),
     });

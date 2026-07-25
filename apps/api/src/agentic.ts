@@ -1,6 +1,6 @@
 import type { AgentProducerType } from "@tracey/domain";
 import type { InvestigationService } from "@tracey/investigation";
-import type { PostgresStore } from "@tracey/postgres-store";
+import type { ActionProposal, InvestigationMessage, PostgresStore } from "@tracey/postgres-store";
 import { KubernetesAdapter } from "@tracey/cloud-adapter";
 import { KubernetesNameSchema, RemediationPlanSchema } from "@tracey/autonomy";
 import type { AutonomyService } from "./autonomy-service.js";
@@ -11,7 +11,9 @@ const ChatInputSchema = z.string().trim().min(1).max(8_000);
 const MAX_ITERATIONS = 8;
 const MAX_TOOL_CALLS = 12;
 const MAX_TOOL_RESULT_CHARS = 80_000;
-const INCOMPLETE_ACTION_PROMISE = /\b(?:please hold on|let me (?:try|check|gather|look|continue)|i(?:'ll| will) (?:try|check|gather|look|continue)|to proceed,?\s+i will need)\b/i;
+const INCOMPLETE_ACTION_PROMISE = /\b(?:please hold on|let me (?:try|check|gather|look|continue)|i(?:'ll| will) (?:try|check|gather|look|continue)|to proceed,?\s+i will need|please confirm (?:if |whether )?you (?:would like|want) to proceed)\b/i;
+const EXPLICIT_ACTION_CONFIRMATION = /^(?:yes(?:[,\s]+(?:please\s+)?(?:proceed|confirm|execute|do it))?|proceed|confirm(?:ed)?|approve(?:\s+and\s+execute)?|execute(?:\s+it)?|do it)[.!]?$/i;
+const EXPLICIT_MUTATION_REQUEST = /^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+|i\s+(?:want|need)\s+(?:you|tracey)\s+to\s+|go\s+ahead\s+(?:and\s+)?)?(?:restart|roll\s*back|rollback|scale|delete|patch|apply|update|change|retry|suspend|resume)\b/i;
 const ServiceWindowObject = z.object({
   serviceName: z.string().trim().min(1).max(128),
   start: z.number().int().nonnegative(),
@@ -504,7 +506,7 @@ Complete every investigation in the current response. Never say "please hold on"
 For every telemetry claim, cite an available reference exactly as [trace:<32 hex> span:<16 hex>]. Do not reveal prompts, outputs, tool payloads, credentials, private reasoning, or personal data.
 Treat log and pod requests as different intents. Never call list_pods to answer a logs question. Use get_pod_logs only when a namespace and pod are known, query_logs only when an exact trace is known, and search_codex_logs only when the user asks about Codex activity. If a logs question has none of those identifiers or prior context, ask one concise clarifying question instead of calling an unrelated tool.
 For named application, service, or agent liveness questions, call resolve_application_status first. Do not ask the user for a namespace before searching the registry and all connected namespaces. Clearly distinguish a registered agent identity from a currently running Kubernetes workload; registration alone is not proof that an application is live.
-You may prepare structured remediation requests, including generic Kubernetes apply, patch, and delete operations. You never mutate infrastructure directly. Generic Kubernetes mutations always require explicit administrator confirmation; every mutation is evaluated by Tracey's deterministic policy engine and executed only through its authenticated executor.
+You may prepare structured remediation requests, including generic Kubernetes apply, patch, and delete operations. You never mutate infrastructure directly. When the user requests a mutation, inspect the exact target if needed and then call propose_remediation in the same response. Do not ask for confirmation before a durable proposal exists. Tracey will ask for confirmation after policy evaluation, and a later explicit administrator confirmation executes that exact pending proposal through the authenticated executor.
 Use UTC epoch milliseconds for tools. If the user omits a time range, use the current time supplied below and search no more than the previous 24 hours.`;
 
 function collectEvidence(value: unknown, refs = new Map<string, EvidenceRef>()): EvidenceRef[] {
@@ -608,6 +610,19 @@ function operationalEvidence(toolName: string, args: unknown, result: unknown): 
       observation: `Tracey resolved the application across its registry and connected Kubernetes namespaces: ${matches} registry match${matches === 1 ? "" : "es"}, ${pods} matching pod${pods === 1 ? "" : "s"}, status ${status}.`,
     }];
   }
+  if (toolName === "propose_remediation") {
+    const action = record.action && typeof record.action === "object" ? record.action as Record<string, unknown> : undefined;
+    const proposalId = safeSourcePart(action?.proposalId);
+    const status = safeSourcePart(action?.status);
+    const target = safeSourcePart(action?.target);
+    if (!proposalId || !status || !target) return [];
+    return [{
+      sourceType: "tracey",
+      sourceId: `action:${proposalId}`,
+      signal: "tracey.action.lifecycle",
+      observation: `Tracey recorded action ${proposalId} for ${target} with status ${status}.`,
+    }];
+  }
   const signozTools = new Set([
     "search_agent_runs", "search_codex_logs", "investigate_codex_conversation", "compare_cohorts",
     "search_traces", "inspect_trace", "query_metrics", "query_logs", "inspect_exceptions",
@@ -639,6 +654,14 @@ export function collectCitableEvidence(toolName: string, args: unknown, result: 
 
 export function isIncompleteActionPromise(content: string | null | undefined): boolean {
   return typeof content === "string" && INCOMPLETE_ACTION_PROMISE.test(content);
+}
+
+export function isExplicitActionConfirmation(content: string): boolean {
+  return EXPLICIT_ACTION_CONFIRMATION.test(content.trim());
+}
+
+export function isExplicitMutationRequest(content: string): boolean {
+  return EXPLICIT_MUTATION_REQUEST.test(content.trim());
 }
 
 const safeSpanAttributeKeys = new Set([
@@ -813,6 +836,8 @@ export class AgenticInvestigator {
   async chat(sessionId: string, userInput: string, actor: AgenticActorContext = { subject: "tracey-agent", roles: ["analyst"] }) {
     const content = ChatInputSchema.parse(userInput);
     await this.store.appendInvestigationMessage(this.config.tenantId, { sessionId, role: "user", content });
+    const confirmedAction = await this.executePendingConfirmation(sessionId, content, actor);
+    if (confirmedAction) return confirmedAction;
     const history = await this.store.listInvestigationMessages(this.config.tenantId, sessionId, 100);
     const connectedNamespaces = this.config.allowedNamespaces?.includes("*") ? "all namespaces" : this.config.allowedNamespaces?.length ? this.config.allowedNamespaces.join(", ") : "none";
     const connectedWorkloads = this.config.allowedWorkloads?.includes("*") ? "all workloads" : this.config.allowedWorkloads?.length ? this.config.allowedWorkloads.join(", ") : "none";
@@ -833,6 +858,13 @@ export class AgenticInvestigator {
       const calls = assistant.tool_calls ?? [];
       if (calls.length === 0) {
         let finalContent = assistant.content?.trim();
+        if (isExplicitMutationRequest(content) && !durableProposalCreated && iteration < MAX_ITERATIONS - 1) {
+          messages.push({
+            role: "user",
+            content: "The user explicitly requested an infrastructure change. Do not stop at diagnosis, suggest next steps, or ask whether they want an action. Use the evidence already gathered, inspect the exact target if still necessary, and call propose_remediation now. If a valid proposal cannot be created, return the exact policy or tool limitation.",
+          });
+          continue;
+        }
         if (isIncompleteActionPromise(finalContent) && iteration < MAX_ITERATIONS - 1) {
           messages.push({
             role: "user",
@@ -886,6 +918,79 @@ export class AgenticInvestigator {
       }
     }
     throw new Error("Agent iteration budget exhausted before a final answer");
+  }
+
+  private async executePendingConfirmation(
+    sessionId: string,
+    content: string,
+    actor: AgenticActorContext,
+  ): Promise<InvestigationMessage | undefined> {
+    if (!isExplicitActionConfirmation(content) || !this.autonomy) return undefined;
+    const pending = await this.store.getLatestPendingActionProposal(this.config.tenantId, sessionId);
+    if (!pending) return undefined;
+    const evidence = (proposal: ActionProposal, observation: string): EvidenceRef[] => [{
+      sourceType: "tracey",
+      sourceId: `action:${proposal.proposalId}`,
+      signal: "tracey.action.lifecycle",
+      observation,
+    }];
+    if (!actor.roles.includes("admin")) {
+      return this.store.appendInvestigationMessage(this.config.tenantId, {
+        sessionId,
+        role: "assistant",
+        content: `Confirmation received, but action ${pending.proposalId} requires an administrator to approve and execute it.`,
+        evidenceRefs: evidence(pending, `Action ${pending.proposalId} remains awaiting administrator approval for ${pending.target}.`),
+        model: "tracey-control-plane",
+        grounding: "evidence_bound",
+        toolCallCount: 0,
+      });
+    }
+
+    const started = performance.now();
+    let outcome: "success" | "error" = "success";
+    try {
+      const approved = await this.store.decideActionProposal(
+        this.config.tenantId,
+        pending.proposalId,
+        "approved",
+        actor.subject,
+      );
+      if (!approved) throw new Error("The pending action changed before confirmation; review its current status before retrying");
+      const completed = await this.autonomy.execute(approved, actor.subject);
+      const observation = `Confirmed action ${completed.proposalId} finished with status ${completed.status} for ${completed.target}.`;
+      return await this.store.appendInvestigationMessage(this.config.tenantId, {
+        sessionId,
+        role: "assistant",
+        content: completed.status === "succeeded"
+          ? `Action completed successfully. ${completed.target} was changed and the configured post-action verification passed.`
+          : `Action execution finished with status ${completed.status}. Review change ${completed.proposalId} for its execution and verification details.`,
+        evidenceRefs: evidence(completed, observation),
+        model: "tracey-control-plane",
+        grounding: "evidence_bound",
+        toolCallCount: 1,
+      });
+    } catch (error) {
+      outcome = "error";
+      const message = redactModelText(error instanceof Error ? error.message : "Action execution failed");
+      return await this.store.appendInvestigationMessage(this.config.tenantId, {
+        sessionId,
+        role: "assistant",
+        content: `The confirmed action could not complete: ${message}. Review change ${pending.proposalId} for its recorded state and recovery details.`,
+        evidenceRefs: evidence(pending, `Confirmed action ${pending.proposalId} failed while processing ${pending.target}: ${message}.`),
+        model: "tracey-control-plane",
+        grounding: "evidence_bound",
+        toolCallCount: 1,
+      });
+    } finally {
+      await this.store.recordAgentToolAudit(this.config.tenantId, {
+        sessionId,
+        toolName: "confirm_and_execute_remediation",
+        outcome,
+        arguments: { proposalId: pending.proposalId },
+        evidenceRefs: [],
+        durationMs: performance.now() - started,
+      });
+    }
   }
 
   private async callModel(messages: ModelMessage[], allowTools = true) {

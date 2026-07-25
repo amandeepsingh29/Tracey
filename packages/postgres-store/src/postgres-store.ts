@@ -653,6 +653,20 @@ export class PostgresStore {
     return this.withTenant(tenantId,async(client)=>{const result=await client.query(`SELECT * FROM tracey.action_proposals WHERE tenant_id=$1 AND proposal_id=$2 LIMIT 1`,[tenantId,z.string().uuid().parse(proposalId)]);return result.rows[0]?normalizeActionProposal(result.rows[0]):undefined;});
   }
 
+  async getLatestPendingActionProposal(tenantId: string, sessionId: string): Promise<ActionProposal | undefined> {
+    const safeSessionId = z.string().uuid().parse(sessionId);
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM tracey.action_proposals
+          WHERE tenant_id=$1 AND session_id=$2 AND status='awaiting_approval'
+          ORDER BY created_at DESC, proposal_id DESC
+          LIMIT 1`,
+        [tenantId, safeSessionId],
+      );
+      return result.rows[0] ? normalizeActionProposal(result.rows[0]) : undefined;
+    });
+  }
+
   async requireActionReapproval(tenantId: string, proposalId: string, actor: string): Promise<ActionProposal | undefined> {
     return this.withTenant(tenantId, async (client) => {
       const id = z.string().uuid().parse(proposalId);
