@@ -52,7 +52,7 @@ export function codexLogsToExecutions(input: {
     const attributes = ordered.map((log) => log.attributes);
     const conversationId = attributes.map((item) => stringAttribute(item, "conversation.id")).find(Boolean);
     const traceId = ordered.map((log) => usefulTraceId(log.traceId)).find(Boolean);
-    const model = attributes.map((item) => stringAttribute(item, "model")).findLast(Boolean);
+    const model = [...attributes].reverse().map((item) => stringAttribute(item, "model")).find(Boolean);
     const tools = [...new Set(attributes.map((item) => stringAttribute(item, "tool_name")).filter((value): value is string => Boolean(value)))].sort();
     const durations = attributes.map((item) => numberAttribute(item, "duration_ms")).filter((value): value is number => value !== undefined);
     const inputTokens = attributes.reduce((total, item) => total + (numberAttribute(item, "input_token_count") ?? 0), 0);

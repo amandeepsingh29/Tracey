@@ -915,7 +915,7 @@ export function buildServer(config: AppConfig) {
           serviceName,
           start: parsed.data.start,
           end: parsed.data.end,
-          limit: Math.min(parsed.data.limit * 20, 5_000),
+          limit: Math.min(parsed.data.limit * 20, 1_000),
         });
         const executions = codexLogsToExecutions({
           logs: result.logs,
@@ -976,7 +976,7 @@ export function buildServer(config: AppConfig) {
           }, agent.producerType);
           const executions = agentRunsToExecutions({
             runs: result.runs,
-            producerType: agent.producerType,
+            producerType: agent.producerType as "claude_code" | "custom_otel",
             producerName: agent.displayName,
             serviceName: agent.serviceName,
             environment: agent.environment,

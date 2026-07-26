@@ -1,7 +1,7 @@
 import type {
   ActionEvent, ActionProposal, Agent, Connector, Health, InvestigationMessage,
   InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
-  Incident, IncidentEvent, IncidentStatus,
+  Incident, IncidentEvent, IncidentStatus, ExecutionFeed,
 } from "../types";
 
 export class ApiError extends Error {
@@ -37,6 +37,7 @@ export const api = {
   agents: (limit = 100) => request<{ agents: Agent[] }>(`/v1/agents?${query({ limit })}`),
   createAgent: (input: Omit<Agent, "agentId" | "status" | "createdAt" | "updatedAt">) => request<Agent>("/v1/agents", { method: "POST", body: JSON.stringify(input) }),
   agentRuns: (agentId: string, input: { start: number; end: number; runId?: string; limit?: number; offset?: number }) => request<RunSearchResult>(`/v1/agents/${agentId}/runs?${query(input)}`),
+  executions: (start: number, end: number, limit = 200) => request<ExecutionFeed>(`/v1/executions?${query({ start, end, limit })}`),
   trace: (traceId: string, start: number, end: number) => request<TraceDetails>(`/v1/signoz/traces/${traceId}?${query({ start, end })}`),
   metrics: (serviceName: string, start: number, end: number) => request<Record<string, unknown>>(`/v1/signoz/metrics/agent-runs?${query({ serviceName, start, end, stepInterval: 300 })}`),
   investigations: () => request<{ investigations: InvestigationSession[] }>("/v1/investigations"),

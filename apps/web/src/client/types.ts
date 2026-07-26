@@ -131,6 +131,43 @@ export type ActionEvent = {
   createdAt: string;
 };
 
+export type ObservedExecution = {
+  executionId: string;
+  producerType: "codex_desktop" | "codex_cli" | "claude_code" | "custom_otel";
+  producerName: string;
+  serviceName: string;
+  environment: string;
+  runId: string;
+  traceId?: string;
+  conversationId?: string;
+  status: "succeeded" | "failed" | "observed";
+  startedAt: string;
+  durationMs?: number;
+  model?: string;
+  tools: string[];
+  inputTokens?: number;
+  outputTokens?: number;
+  eventCount: number;
+};
+
+export type ExecutionSource = {
+  sourceId: string;
+  displayName: string;
+  serviceName?: string;
+  producerType: string;
+  status: "complete" | "empty" | "unavailable" | "not_registered";
+  observedExecutions: number;
+  limitation?: string;
+};
+
+export type ExecutionFeed = {
+  executions: ObservedExecution[];
+  sources: ExecutionSource[];
+  window: { start: number; end: number };
+  registeredAgentCount: number;
+  truncated: boolean;
+};
+
 export type Notification = {
   notificationId: string;
   sessionId?: string;
