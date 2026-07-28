@@ -1,9 +1,9 @@
 "use client";
 
 import {
-  Activity, Bell, Bot, Cable, ChevronRight, CircleGauge, Command, FileSearch,
+  Activity, Bot, Cable, ChevronRight, CircleGauge, Command, FileSearch,
   GitPullRequestArrow, Menu, PanelLeftClose, PanelLeftOpen, Search, Settings,
-  ShieldCheck, Siren, X,
+  X,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import Image from "next/image";
@@ -14,14 +14,11 @@ import { api } from "../lib/api";
 
 const navigation = [
   { href: "/", label: "Overview", icon: CircleGauge },
-  { href: "/agents", label: "Agents", icon: Bot },
   { href: "/runs", label: "Runs", icon: Activity },
-  { href: "/incidents", label: "Incidents", icon: Siren },
-  { href: "/investigations", label: "Investigations", icon: FileSearch },
-  { href: "/changes", label: "Changes", icon: GitPullRequestArrow },
+  { href: "/investigations", label: "Investigate", icon: FileSearch },
+  { href: "/agents", label: "Agents", icon: Bot },
   { href: "/connectors", label: "Connectors", icon: Cable },
-  { href: "/policies", label: "Policies", icon: ShieldCheck },
-  { href: "/notifs", label: "Notifications", icon: Bell },
+  { href: "/changes", label: "Changes", icon: GitPullRequestArrow },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -78,15 +75,13 @@ export function Shell({ children }: PropsWithChildren) {
 function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (path: string) => void }) {
   const [value, setValue] = useState("");
   const agents = useQuery({ queryKey: ["agents", "global-search"], queryFn: () => api.agents(), staleTime: 30_000 });
-  const incidents = useQuery({ queryKey: ["incidents", "global-search"], queryFn: () => api.incidents(), staleTime: 30_000, retry: false });
   const actions = useQuery({ queryKey: ["actions", "global-search"], queryFn: () => api.actions(), staleTime: 30_000 });
   const term = value.trim().toLowerCase();
   const pages = navigation.filter((item) => item.label.toLowerCase().includes(term)).map((item) => ({ path: item.href, label: item.label, meta: "Page", icon: item.icon }));
   const entities = term.length < 2 ? [] : [
     ...(agents.data?.agents ?? []).filter((item) => [item.displayName, item.serviceName, item.environment].some((text) => text.toLowerCase().includes(term))).slice(0, 4).map((item) => ({ path: `/agents/${item.agentId}`, label: item.displayName, meta: `Agent · ${item.serviceName}`, icon: Bot })),
-    ...(incidents.data?.incidents ?? []).filter((item) => [item.title, item.summary, item.environment].some((text) => text.toLowerCase().includes(term))).slice(0, 4).map((item) => ({ path: `/incidents/${item.incidentId}`, label: item.title, meta: `Incident · ${item.status}`, icon: Siren })),
     ...(actions.data?.actions ?? []).filter((item) => [item.target, item.reason, item.actionType].some((text) => text.toLowerCase().includes(term))).slice(0, 4).map((item) => ({ path: `/changes/${item.proposalId}`, label: item.remediationPlan?.summary ?? item.actionType, meta: `Change · ${item.target}`, icon: GitPullRequestArrow })),
   ];
   const results = [...entities, ...pages].slice(0, 12);
-  return <div className="command-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="command-palette" role="dialog" aria-modal="true" aria-label="Search Tracey"><div className="command-input"><Search /><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} placeholder="Find agents, runs, incidents, and changes…" aria-label="Search" /><kbd>ESC</kbd></div><div className="command-results">{results.map(({ path, label, meta, icon: Icon }) => <button key={path} onClick={() => onNavigate(path)}><Icon size={17} /><span><strong>{label}</strong><small>{meta}</small></span><ChevronRight size={15} /></button>)}{value && <button onClick={() => onNavigate(`/runs?search=${encodeURIComponent(value)}`)}><Activity size={17} /><span><strong>Search observed runs</strong><small>Run ID, trace ID, model, or service matching “{value}”</small></span><ChevronRight size={15} /></button>}</div></section></div>;
+  return <div className="command-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="command-palette" role="dialog" aria-modal="true" aria-label="Search Tracey"><div className="command-input"><Search /><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} placeholder="Find agents, runs, and changes…" aria-label="Search" /><kbd>ESC</kbd></div><div className="command-results">{results.map(({ path, label, meta, icon: Icon }) => <button key={path} onClick={() => onNavigate(path)}><Icon size={17} /><span><strong>{label}</strong><small>{meta}</small></span><ChevronRight size={15} /></button>)}{value && <button onClick={() => onNavigate(`/runs?search=${encodeURIComponent(value)}`)}><Activity size={17} /><span><strong>Search observed runs</strong><small>Run ID, trace ID, model, or service matching “{value}”</small></span><ChevronRight size={15} /></button>}</div></section></div>;
 }

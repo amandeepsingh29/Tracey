@@ -1,7 +1,7 @@
 "use client";
 
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { Activity, ArrowRight, Bell, Bot, Cable, Check, CircleAlert, GitPullRequestArrow, Radar, Rocket, ShieldCheck } from "lucide-react";
+import { Activity, ArrowRight, Bell, Bot, Cable, Check, CircleAlert, FileSearch, GitPullRequestArrow, Radar, Rocket, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -20,19 +20,19 @@ export function OverviewPage() {
     { queryKey: ["agents"], queryFn: () => api.agents() },
     { queryKey: ["actions"], queryFn: () => api.actions() },
     { queryKey: ["notifications", false], queryFn: () => api.notifications(false) },
-    { queryKey: ["incidents"], queryFn: () => api.incidents(), retry: false },
+    { queryKey: ["investigations"], queryFn: api.investigations, retry: false },
   ] });
-  const [health, connectors, agents, actions, notifications, incidents] = results;
+  const [health, connectors, agents, actions, notifications, investigations] = results;
   const eligibleAgents = (agents.data?.agents ?? []).filter((agent) => (environment === "all" || agent.environment === environment) && !["codex_desktop", "codex_cli"].includes(agent.producerType));
   const windowMs = rangeHours * 3_600_000;
   const runQueries = useQueries({ queries: eligibleAgents.map((agent) => ({ queryKey: ["overview-runs", agent.agentId, rangeHours, now], queryFn: () => api.agentRuns(agent.agentId, { start: now - 2 * windowMs, end: now, limit: 100 }), retry: false })) });
   if (results.every((result) => result.isLoading)) return <div className="page"><LoadingState /></div>;
   const firstError = results.find((result) => result.error)?.error;
-  const connectorList = connectors.data?.connectors ?? [];
+  const connectorList = (connectors.data?.connectors ?? []).filter(({ id }) => id !== "mcp");
   const agentList = agents.data?.agents ?? [];
   const actionList = actions.data?.actions ?? [];
   const notificationList = notifications.data?.notifications ?? [];
-  const incidentList = incidents.data?.incidents ?? [];
+  const investigationList = investigations.data?.investigations ?? [];
   const observedRuns = runQueries.flatMap((query) => query.data?.runs ?? []);
   const runTime = (run: typeof observedRuns[number]) => new Date(String(run.startedAt ?? run.startTime ?? 0)).getTime();
   const currentRuns = observedRuns.filter((run) => runTime(run) >= now - windowMs);
@@ -48,7 +48,6 @@ export function OverviewPage() {
   const previousTokens = previousRuns.reduce((sum, run) => sum + Number(run.tokenUsage?.total ?? 0), 0);
   const cost = currentRuns.reduce((sum, run) => sum + Number(run.costNanoUsd ?? 0), 0) / 1_000_000_000;
   const previousCost = previousRuns.reduce((sum, run) => sum + Number(run.costNanoUsd ?? 0), 0) / 1_000_000_000;
-  const activeIncidents = incidentList.filter((incident) => !["resolved", "dismissed"].includes(incident.status) && (environment === "all" || incident.environment === environment)).length;
   const pending = actionList.filter(({ status }) => status === "awaiting_approval").length;
   const failed = actionList.filter(({ status }) => ["failed", "revert_failed"].includes(status)).length;
   const recovered = actionList.filter(({ status }) => ["reverted", "succeeded"].includes(status)).length;
@@ -61,7 +60,7 @@ export function OverviewPage() {
     {needsSetup && <button className="setup-banner" onClick={() => router.push("/onboarding")}><div className="setup-icon"><Rocket /></div><div><strong>Finish setting up Tracey</strong><span>Connect telemetry, validate infrastructure, and register your first production agent.</span></div><ArrowRight /></button>}
     <section className="metrics-grid" aria-label="Operational metrics">
       <Link href="/agents"><MetricCard label="Connected agents" value={environment === "all" ? agentList.length : agentList.filter((agent) => agent.environment === environment).length} detail={agentList.length ? `${agentList.filter(({ status }) => status === "active").length} actively monitored` : "Register your first agent"} icon={Bot} /></Link>
-      <Link href="/incidents"><MetricCard label="Active incidents" value={activeIncidents} detail={activeIncidents ? "Investigation or monitoring required" : "No active incidents"} icon={CircleAlert} tone={activeIncidents ? "danger" : "success"} /></Link>
+      <Link href="/investigations"><MetricCard label="Investigations" value={investigationList.length} detail={investigationList.length ? "Grounded investigation history" : "Start your first investigation"} icon={FileSearch} /></Link>
       <Link href="/runs?status=error"><MetricCard label="Failed runs" value={currentRuns.filter(isFailure).length} detail={`${failureDelta >= 0 ? "+" : ""}${failureDelta.toFixed(1)} pp vs previous window`} icon={Activity} tone={currentRuns.some(isFailure) ? "danger" : "success"} /></Link>
       <Link href="/changes?status=awaiting_approval"><MetricCard label="Pending approvals" value={pending} detail={pending ? "Operator decision required" : "No changes waiting"} icon={GitPullRequestArrow} tone={pending ? "warning" : "default"} /></Link>
       <Link href="/connectors"><MetricCard label="Connector health" value={`${readyConnectors}/${connectorList.length || 0}`} detail={connectorList.some(({ state }) => state === "needs_configuration") ? "Setup needs attention" : "Connected systems ready"} icon={Cable} /></Link>
@@ -70,8 +69,8 @@ export function OverviewPage() {
       <Link href="/runs"><MetricCard label="Tokens / cost" value={tokens ? tokens.toLocaleString() : "—"} detail={tokens && previousTokens ? `${(((tokens - previousTokens) / previousTokens) * 100).toFixed(1)}% tokens · $${cost.toFixed(4)} (${previousCost ? `${(((cost - previousCost) / previousCost) * 100).toFixed(1)}%` : "new"})` : cost ? `$${cost.toFixed(4)} estimated from emitted pricing` : "Cost not emitted"} icon={Bot} /></Link>
     </section>
     <div className="two-column">
-      <Panel title="Recent operational activity" subtitle="Real notifications generated by investigations, policy decisions, and actions." action={<Link className="text-link" href="/notifs">View inbox <ArrowRight size={14} /></Link>}>
-        {notificationList.length === 0 ? <EmptyState title="No operational activity yet" description="Tracey will record incidents, approvals, connector problems, and recoveries here." icon={Bell} /> : <div className="activity-list">{notificationList.slice(0, 6).map((notification) => <Link href={notification.sessionId ? `/investigations/${notification.sessionId}` : "/notifs"} key={notification.notificationId} className="activity-row"><div className={`activity-signal severity-${notification.severity}`}><CircleAlert size={16} /></div><div><strong>{notification.title}</strong><p>{notification.summary}</p><span>{relativeTime(notification.createdAt)}</span></div><StatusChip value={notification.severity} /></Link>)}</div>}
+      <Panel title="Recent operational activity" subtitle="Real findings generated by investigations, policy decisions, and actions.">
+        {notificationList.length === 0 ? <EmptyState title="No operational activity yet" description="Tracey will record approvals, connector problems, failures, and recoveries here." icon={Bell} /> : <div className="activity-list">{notificationList.slice(0, 6).map((notification) => <Link href={notification.sessionId ? `/investigations/${notification.sessionId}` : notification.category === "approval" || notification.category === "recovery" ? "/changes" : "/investigations"} key={notification.notificationId} className="activity-row"><div className={`activity-signal severity-${notification.severity}`}><CircleAlert size={16} /></div><div><strong>{notification.title}</strong><p>{notification.summary}</p><span>{relativeTime(notification.createdAt)}</span></div><StatusChip value={notification.severity} /></Link>)}</div>}
       </Panel>
       <Panel title="Connected systems" subtitle="The evidence and execution surfaces Tracey can currently reach." action={<Link className="text-link" href="/connectors">Manage <ArrowRight size={14} /></Link>}>
         {connectorList.length === 0 ? <EmptyState title="Connector status unavailable" description="Connect the Tracey API to inspect configured systems." icon={Cable} /> : <div className="connector-compact">{connectorList.map((connector) => <Link href={`/connectors?connector=${connector.id}`} key={connector.id}><div><strong>{connector.displayName}</strong><span>{titleCase(connector.category)}</span></div><StatusChip value={connector.state} /></Link>)}</div>}
