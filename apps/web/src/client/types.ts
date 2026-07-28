@@ -168,6 +168,70 @@ export type ExecutionFeed = {
   truncated: boolean;
 };
 
+export type CodexConversationTurn = {
+  conversationId: string;
+  turnIndex: number;
+  turnId?: string;
+  prompt: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  eventCount: number;
+  toolNames: string[];
+  status: "complete" | "incomplete";
+};
+
+export type RecentCodexConversations = {
+  conversations: CodexConversationTurn[];
+  windowHours: number;
+  source: "local_codex_session";
+};
+
+export type ExecutionGraphNode = {
+  nodeId: string;
+  kind: "prompt" | "model" | "reasoning" | "decision" | "tool" | "result" | "final";
+  label: string;
+  summary: string;
+  timestamp: string;
+  durationMs?: number;
+  status: "succeeded" | "failed" | "observed";
+  content?: string;
+  sensitive: boolean;
+  source: "codex_session" | "signoz";
+  attributes: Record<string, unknown>;
+};
+
+export type ExecutionGraphEdge = {
+  edgeId: string;
+  from: string;
+  to: string;
+  relationship: "sequence" | "tool_result" | "approval";
+  certainty: "observed" | "inferred";
+};
+
+export type CodexExecutionGraph = {
+  executionId: string;
+  runId: string;
+  conversationId: string;
+  turnIndex: number;
+  status: "complete" | "incomplete" | "failed";
+  model?: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  contentSource: "local_session" | "telemetry_only";
+  forensicModeAvailable: boolean;
+  sensitiveValuesIncluded: boolean;
+  nodes: ExecutionGraphNode[];
+  edges: ExecutionGraphEdge[];
+  evidence: Array<{ eventName: string; timestamp: string; sourceTraceId: string; sourceSpanId?: string }>;
+  evidenceCompleteness: number;
+  limitations: string[];
+  analysis: Record<string, unknown>;
+  diagnosis: Record<string, unknown>;
+  rawEvents: Array<Record<string, unknown>>;
+};
+
 export type Notification = {
   notificationId: string;
   sessionId?: string;

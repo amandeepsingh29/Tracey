@@ -1,6 +1,6 @@
 # Codex telemetry integration
 
-Codex can export its own OpenTelemetry logs and traces to the same collector used by Tracey. This is a native Codex integration; it does not read transcript files or scrape terminal output.
+Codex exports OpenTelemetry logs and traces to the same collector used by Tracey. For developer workstations, Tracey can additionally join those observed events to the matching local Codex session file. This provides the complete prompt, assistant responses, tool arguments, command output, and final result in the execution graph without exporting that content back to SigNoz.
 
 Add the following to the user-level Codex configuration (`~/.codex/config.toml`). Telemetry keys belong at user level because Codex intentionally ignores project-level provider and telemetry settings.
 
@@ -29,6 +29,8 @@ With the Tracey collector running, Codex emits real run and tool telemetry to Si
 
 Keep `log_user_prompt = false`. Codex then exports prompt length and operational metadata without exporting prompt content. Tool inputs, tool-result output snippets, and account identity metadata can still be present in the native stream. Both production collector configurations delete `prompt`, `output`, generic `arguments`/`result`/`command`, standardized GenAI content/tool fields, `user.email`, `user.account_id`, and `host.name` before export.
 
+The execution-detail page restores developer transparency locally by reading the corresponding session under `~/.codex/sessions`. Set `TRACEY_CODEX_SESSIONS_DIR` when Codex uses a different home, and set `TRACEY_LOCAL_FORENSIC_MODE=false` to disable local content access. Detected credential values remain protected until an administrator deliberately selects **Reveal sensitive values** for the current browser session. The reveal response is authenticated, marked `no-store`, and is not supplied to Tracey's investigation model.
+
 ## Tracey normalization
 
 Tracey queries events by bounded `conversation.id`, service, tenant, environment, and time range. It segments each `codex.user_prompt` into a turn and projects observed `response.completed`, tool-decision, and tool-result events into an `agent.run` graph. The projection includes model and token usage, tool duration/outcome, source event references, completeness, and deterministic diagnosis.
@@ -39,7 +41,10 @@ HTTP:
 
 ```text
 GET /v1/signoz/codex/conversations/{conversationId}?start={epoch_ms}&end={epoch_ms}
+GET /v1/executions/codex/{conversationId}/graph?start={epoch_ms}&end={epoch_ms}&at={epoch_ms}
 ```
+
+In the web product, open **Runs**, select a Codex execution, and use the default **Graph** tab. The same page also provides **Timeline**, **Evidence**, and **Raw events** views.
 
 MCP: `tracey_get_codex_conversation`.
 

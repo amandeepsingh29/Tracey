@@ -53,6 +53,8 @@ const ConfigSchema = z.object({
   MCP_TOOL_TIMEOUT_MS: z.coerce.number().int().min(250).max(120_000).default(15_000),
   TRACEY_MCP_BEARER_TOKEN: OptionalStringSchema,
   TRACEY_MCP_ALLOWED_HOSTS: z.string().default("localhost,127.0.0.1"),
+  TRACEY_CODEX_SESSIONS_DIR: OptionalStringSchema,
+  TRACEY_LOCAL_FORENSIC_MODE: z.enum(["true", "false"]).transform((value) => value === "true").optional(),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;

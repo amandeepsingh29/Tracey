@@ -2,6 +2,7 @@ import type {
   ActionEvent, ActionProposal, Agent, Connector, Health, InvestigationMessage,
   InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
   Incident, IncidentEvent, IncidentStatus, ExecutionFeed,
+  CodexExecutionGraph, RecentCodexConversations,
 } from "../types";
 
 export class ApiError extends Error {
@@ -38,6 +39,10 @@ export const api = {
   createAgent: (input: Omit<Agent, "agentId" | "status" | "createdAt" | "updatedAt">) => request<Agent>("/v1/agents", { method: "POST", body: JSON.stringify(input) }),
   agentRuns: (agentId: string, input: { start: number; end: number; runId?: string; limit?: number; offset?: number }) => request<RunSearchResult>(`/v1/agents/${agentId}/runs?${query(input)}`),
   executions: (start: number, end: number, limit = 200) => request<ExecutionFeed>(`/v1/executions?${query({ start, end, limit })}`),
+  recentCodexConversations: (hours = 168, limit = 40) =>
+    request<RecentCodexConversations>(`/v1/executions/codex/recent?${query({ hours, limit })}`),
+  codexExecutionGraph: (conversationId: string, input: { start: number; end: number; serviceName: string; at?: number; turnIndex?: number; includeSensitive?: boolean }) =>
+    request<CodexExecutionGraph>(`/v1/executions/codex/${encodeURIComponent(conversationId)}/graph?${query(input)}`),
   trace: (traceId: string, start: number, end: number) => request<TraceDetails>(`/v1/signoz/traces/${traceId}?${query({ start, end })}`),
   metrics: (serviceName: string, start: number, end: number) => request<Record<string, unknown>>(`/v1/signoz/metrics/agent-runs?${query({ serviceName, start, end, stepInterval: 300 })}`),
   investigations: () => request<{ investigations: InvestigationSession[] }>("/v1/investigations"),

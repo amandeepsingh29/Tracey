@@ -242,7 +242,7 @@ Inspect workloads and perform approved, typed remediation through separate inves
 
 Normalize privacy-safe Codex Desktop and CLI OpenTelemetry events into agent runs, model activity, tool activity, failures, latency, and token evidence.
 
-Tracey does not read local Codex conversation storage.
+For developer workstations, Tracey can read the matching local Codex session to build a complete prompt-to-action graph. This local forensic connector can be disabled and does not export captured conversation content back to SigNoz.
 
 ### Claude Code
 

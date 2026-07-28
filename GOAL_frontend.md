@@ -125,7 +125,8 @@ Last updated: 2026-07-22
 - [x] Show failure location and error classification.
 - [x] Distinguish observed values from inferred conclusions.
 - [x] Link runs to SigNoz without forcing users to inspect SigNoz first.
-- [x] Protect prompts, outputs, credentials, and private tool payloads.
+- [x] Show complete local prompts, responses, tool inputs, outputs, commands, and raw events in the execution detail page.
+- [x] Add an explicit local forensic reveal flow for credential and authentication material without exporting it to SigNoz or the investigation model.
 
 ## 8. Incident management
 

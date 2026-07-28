@@ -846,6 +846,7 @@ export class AgenticInvestigator {
       ...history.slice(-20).map(({ role, content: messageContent }) => ({ role, content: messageContent })),
     ];
     const evidence = new Map<string, EvidenceRef>();
+    const toolFailures: Array<{ toolName: string; reason: string }> = [];
     let toolCallCount = 0;
     let durableProposalCreated = false;
     let responseModel = this.config.model;
@@ -879,7 +880,9 @@ export class AgenticInvestigator {
           finalContent = synthesis.choices[0]!.message.content?.trim();
         }
         const answer = evidence.size === 0 && toolCallCount > 0 && !durableProposalCreated
-          ? "Tracey could not verify any technical findings because the selected tools returned no citable evidence. Adjust the service, identifier, or time range and try again."
+          ? toolFailures.length > 0
+            ? `Tracey could not complete the requested tool checks. ${toolFailures.map(({ toolName, reason }) => `${toolName}: ${reason}`).join("; ")}.`
+            : "Tracey could not verify any technical findings because the selected tools returned no citable evidence. Adjust the service, identifier, or time range and try again."
           : validateCitations(finalContent || "The provider returned no evidence-backed textual answer.", [...evidence.values()]);
         const grounding = evidence.size > 0 ? "evidence_bound" : toolCallCount > 0 ? "tool_grounded" : "model_only";
         return this.store.appendInvestigationMessage(this.config.tenantId, {
@@ -906,9 +909,13 @@ export class AgenticInvestigator {
           for (const ref of refs) evidence.set(evidenceKey(ref), ref);
         } catch (error) {
           outcome = error instanceof z.ZodError ? "denied" : "error";
+          const reason = error instanceof z.ZodError
+            ? "Invalid tool arguments"
+            : redactModelText(error instanceof Error ? error.message : "Tool execution failed");
           result = error instanceof z.ZodError
             ? { error: "Invalid tool arguments", issues: error.issues.map(({ path, message }) => ({ path, message })) }
-            : { error: error instanceof Error ? error.message : "Tool execution failed" };
+            : { error: reason };
+          toolFailures.push({ toolName: call.function.name, reason });
         }
         await this.store.recordAgentToolAudit(this.config.tenantId, {
           sessionId, toolName: call.function.name, outcome, arguments: args, evidenceRefs: refs, durationMs: performance.now() - started,

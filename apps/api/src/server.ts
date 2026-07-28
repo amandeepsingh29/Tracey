@@ -24,16 +24,17 @@ import { PostgresStore, actionApprovalIsCurrent, type ConnectorConfigRecord } fr
 import { SigNozAdapter, SigNozAdapterError } from "@tracey/signoz-adapter";
 import Fastify from "fastify";
 import { z } from "zod";
+import { homedir } from "node:os";
 import type { AppConfig } from "./config.js";
 import { createApiAuthenticator, requireRoles } from "./auth.js";
 import { createTraceyMcpHttpEndpoint } from "./mcp-http.js";
 import { AgenticInvestigator } from "./agentic.js";
-import { agentUiHtml } from "./agent-ui.js";
 import { ApprovedActionExecutor } from "./action-executor.js";
 import { AutonomyService } from "./autonomy-service.js";
-import { notificationsUiHtml } from "./notifications-ui.js";
 import { ConnectorSecretVault } from "./connector-secrets.js";
 import { agentRunsToExecutions, codexLogsToExecutions, type ObservedExecution } from "./execution-feed.js";
+import { listRecentCodexForensicTurns, readCodexForensicTurn } from "./codex-forensic-reader.js";
+import { buildCodexExecutionGraph, buildLocalCodexExecutionGraph } from "./execution-graph.js";
 
 export function buildServer(config: AppConfig) {
   const server = Fastify({
@@ -262,8 +263,6 @@ export function buildServer(config: AppConfig) {
     },
   }));
 
-  server.get("/agent", async (_request, reply) => reply.type("text/html; charset=utf-8").send(agentUiHtml));
-  server.get("/notifs", async (_request, reply) => reply.type("text/html; charset=utf-8").send(notificationsUiHtml));
   server.get("/v1/connectors", { preHandler: apiAuth }, async () => {
     const configurations = store ? await store.listConnectorConfigs(config.TRACEY_TENANT_ID) : [];
     return { connectors: connectorRegistry().map((descriptor) => { const saved = configurations.find((item) => item.connectorId === descriptor.id); return saved ? { ...descriptor, state: saved.enabled ? (saved.status === "ready" ? "ready" : "needs_configuration") : "disabled", statusReason: saved.latestError ?? descriptor.statusReason,
@@ -1039,6 +1038,119 @@ export function buildServer(config: AppConfig) {
       registeredAgentCount: registered.length,
       truncated: results.some(({ executions: items }) => items.length >= parsed.data.limit) || executions.length >= parsed.data.limit,
     };
+  });
+
+  server.get("/v1/executions/codex/recent", { preHandler: adminAuth }, async (request, reply) => {
+    const forensicModeEnabled = config.TRACEY_LOCAL_FORENSIC_MODE ?? config.DEPLOYMENT_ENVIRONMENT === "development";
+    if (!forensicModeEnabled) {
+      return reply.code(403).send({ error: "Local Codex session discovery is disabled for this Tracey deployment" });
+    }
+    const parsed = z.object({
+      hours: z.coerce.number().int().min(1).max(168).default(168),
+      limit: z.coerce.number().int().min(1).max(100).default(40),
+    }).safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "Invalid recent Codex conversation query", issues: parsed.error.issues });
+    }
+    try {
+      const conversations = await listRecentCodexForensicTurns({
+        sessionsDir: config.TRACEY_CODEX_SESSIONS_DIR ?? `${homedir()}/.codex/sessions`,
+        since: Date.now() - parsed.data.hours * 3_600_000,
+        limit: parsed.data.limit,
+      });
+      reply.header("cache-control", "no-store, private");
+      return { conversations, windowHours: parsed.data.hours, source: "local_codex_session" };
+    } catch (error) {
+      request.log.error({ err: error }, "Recent local Codex conversation discovery failed");
+      return reply.code(503).send({ error: "Recent Codex conversations could not be read from the local connector" });
+    }
+  });
+
+  server.get("/v1/executions/codex/:conversationId/graph", { preHandler: adminAuth }, async (request, reply) => {
+    const forensicModeEnabled = config.TRACEY_LOCAL_FORENSIC_MODE ?? config.DEPLOYMENT_ENVIRONMENT === "development";
+    if (!investigations && !forensicModeEnabled) {
+      return reply.code(503).send({ error: "A SigNoz or local Codex connector is required for the Codex execution graph" });
+    }
+    const params = request.params as { conversationId?: string };
+    const query = request.query as Record<string, unknown>;
+    const parsed = z.object({
+      conversationId: z.string().uuid(),
+      start: z.coerce.number().int().nonnegative(),
+      end: z.coerce.number().int().positive(),
+      serviceName: z.enum(["codex-app-server", "Codex Desktop"]).default("codex-app-server"),
+      turnIndex: z.coerce.number().int().min(1).optional(),
+      at: z.coerce.number().int().nonnegative().optional(),
+      includeSensitive: z.enum(["true", "false"]).transform((value) => value === "true").default("false"),
+    }).refine(({ start, end }) => start < end && end - start <= 7 * 86_400_000, "time range must be between one millisecond and seven days")
+      .safeParse({ conversationId: params.conversationId, ...query });
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "Invalid Codex execution graph query", issues: parsed.error.issues });
+    }
+    if (parsed.data.includeSensitive && !forensicModeEnabled) {
+      return reply.code(403).send({ error: "Local forensic mode is disabled for this Tracey deployment" });
+    }
+    const forensicTurn = forensicModeEnabled
+      ? await readCodexForensicTurn({
+          sessionsDir: config.TRACEY_CODEX_SESSIONS_DIR ?? `${homedir()}/.codex/sessions`,
+          conversationId: parsed.data.conversationId,
+          ...(parsed.data.turnIndex ? { turnIndex: parsed.data.turnIndex } : {}),
+          ...(parsed.data.at ? { at: parsed.data.at } : {}),
+          includeSensitive: parsed.data.includeSensitive,
+        })
+      : undefined;
+    try {
+      if (!investigations) {
+        if (!forensicTurn) return reply.code(404).send({ error: "The requested Codex conversation was not found locally" });
+        reply.header("cache-control", "no-store, private");
+        return buildLocalCodexExecutionGraph({ forensicTurn, sensitiveValuesIncluded: parsed.data.includeSensitive });
+      }
+      const investigation = await investigations.investigateCodexConversation({
+        conversationId: parsed.data.conversationId,
+        start: parsed.data.start,
+        end: parsed.data.end,
+        serviceName: parsed.data.serviceName,
+        limit: 5_000,
+      });
+      const run = parsed.data.turnIndex
+        ? investigation.runs.find(({ turnIndex }) => turnIndex === parsed.data.turnIndex)
+        : parsed.data.at
+          ? [...investigation.runs].sort((left, right) =>
+              Math.abs(Date.parse(left.startedAt) - parsed.data.at!) - Math.abs(Date.parse(right.startedAt) - parsed.data.at!))[0]
+          : investigation.runs.at(-1);
+      if (!run) return reply.code(404).send({ error: "The requested Codex turn was not observed in this window" });
+      const matchedForensicTurn = forensicModeEnabled
+        ? await readCodexForensicTurn({
+            sessionsDir: config.TRACEY_CODEX_SESSIONS_DIR ?? `${homedir()}/.codex/sessions`,
+            conversationId: parsed.data.conversationId,
+            turnIndex: run.turnIndex,
+            at: Date.parse(run.startedAt),
+            includeSensitive: parsed.data.includeSensitive,
+          })
+        : undefined;
+      reply.header("cache-control", "no-store, private");
+      return buildCodexExecutionGraph({
+        run,
+        ...(matchedForensicTurn ? { forensicTurn: matchedForensicTurn } : {}),
+        forensicModeAvailable: forensicModeEnabled,
+        sensitiveValuesIncluded: parsed.data.includeSensitive,
+      });
+    } catch (error) {
+      if (error instanceof InvestigationNotFoundError) {
+        if (forensicTurn) {
+          reply.header("cache-control", "no-store, private");
+          return buildLocalCodexExecutionGraph({ forensicTurn, sensitiveValuesIncluded: parsed.data.includeSensitive });
+        }
+        return reply.code(404).send({ error: error.message });
+      }
+      if (forensicTurn) {
+        request.log.warn({ err: error }, "SigNoz graph evidence unavailable; returning local Codex graph");
+        reply.header("cache-control", "no-store, private");
+        return buildLocalCodexExecutionGraph({ forensicTurn, sensitiveValuesIncluded: parsed.data.includeSensitive });
+      }
+      request.log.error({ err: error }, "Codex execution graph query failed");
+      const status = error instanceof SigNozAdapterError && error.statusCode === 401 ? 502 : 503;
+      return reply.code(status).send({ error: "The Codex execution graph could not be assembled from the connected evidence" });
+    }
   });
 
   server.get("/v1/agents/:agentId/runs", { preHandler: apiAuth }, async (request, reply) => {

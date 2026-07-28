@@ -355,6 +355,37 @@ describe("bounded agentic investigator", () => {
     assert.doesNotMatch(result.content, /agents are healthy/i);
   });
 
+  it("reports the exact tool limitation when a grounded check cannot run", async (context) => {
+    const messages: InvestigationMessage[] = [];
+    const store = {
+      appendInvestigationMessage: async (_tenantId: string, input: Omit<InvestigationMessage, "messageId" | "createdAt">) => {
+        const saved: InvestigationMessage = { ...input, messageId: crypto.randomUUID(), evidenceRefs: input.evidenceRefs ?? [], createdAt: new Date().toISOString() };
+        messages.push(saved);
+        return saved;
+      },
+      listInvestigationMessages: async () => messages,
+      recordAgentToolAudit: async () => undefined,
+    } as unknown as PostgresStore;
+    let request = 0;
+    context.mock.method(globalThis, "fetch", async () => {
+      request += 1;
+      return new Response(JSON.stringify(request === 1 ? {
+        choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "pods-1", type: "function", function: { name: "list_pods", arguments: "{}" } }] } }],
+      } : {
+        choices: [{ message: { role: "assistant", content: "The Kubernetes check could not run." } }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const agent = new AgenticInvestigator({
+      apiKey: "test", model: "test-model", tenantId: "tenant-a", environment: "test", allowedNamespaces: [],
+    }, {} as InvestigationService, store);
+
+    const result = await agent.chat(crypto.randomUUID(), "Inspect active Kubernetes pods.");
+
+    assert.equal(result.grounding, "tool_grounded");
+    assert.match(result.content, /list_pods: No Kubernetes namespaces are connected to Tracey/i);
+    assert.doesNotMatch(result.content, /adjust the service, identifier, or time range/i);
+  });
+
   it("routes model remediation plans through the policy service", async (context) => {
     const messages: InvestigationMessage[] = [];
     let evaluated = false;

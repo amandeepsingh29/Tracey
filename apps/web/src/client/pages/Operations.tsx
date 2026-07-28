@@ -18,7 +18,7 @@ const preferenceOptions = [
 const connectorCopy: Record<Connector["id"], { description: string; permissions: string[] }> = {
   signoz: { description: "Query traces, logs, metrics, and recovery evidence from your SigNoz workspace.", permissions: ["Read-only query API", "OTLP ingestion for telemetry producers"] },
   kubernetes: { description: "Inspect workloads and execute approved, typed remediation through scoped identities.", permissions: ["Read workload state", "Patch only allowed workloads after approval"] },
-  codex: { description: "Normalize Codex desktop and CLI conversations, tools, latency, and token telemetry.", permissions: ["OTLP export from Codex", "No access to local conversation storage"] },
+  codex: { description: "Normalize Codex desktop and CLI conversations, tools, latency, and token telemetry.", permissions: ["OTLP export from Codex", "Optional local session access for developer execution graphs"] },
   "claude-code": { description: "Observe Claude Code interactions through native OpenTelemetry export.", permissions: ["OTLP export from Claude Code", "No filesystem access"] },
   "generic-otel": { description: "Connect any custom agent that emits Tracey’s framework-neutral run contract.", permissions: ["OTLP ingestion", "Service metadata only"] },
   mcp: { description: "Expose bounded Tracey investigation tools or observe an allowlisted external MCP server.", permissions: ["Explicit tool allowlist", "Authenticated MCP transport"] },
