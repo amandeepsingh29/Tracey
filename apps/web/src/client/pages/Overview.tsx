@@ -86,16 +86,34 @@ export function OverviewPage() {
 export function OnboardingPage() {
   const connectors = useQuery({ queryKey: ["connectors"], queryFn: api.connectors });
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.agents() });
+  const investigations = useQuery({ queryKey: ["investigations"], queryFn: api.investigations, retry: false });
+  const registeredAgents = agents.data?.agents ?? [];
+  const hasCodex = registeredAgents.some(({ producerType }) => producerType === "codex_desktop" || producerType === "codex_cli");
+  const executions = useQuery({
+    queryKey: ["onboarding-executions"],
+    queryFn: () => { const end = Date.now(); return api.executions(end - 7 * 86_400_000, end, 50); },
+    enabled: registeredAgents.length > 0,
+    retry: false,
+  });
+  const recentCodex = useQuery({
+    queryKey: ["onboarding-recent-codex"],
+    queryFn: () => api.recentCodexConversations(168, 1),
+    enabled: hasCodex,
+    retry: false,
+  });
   const router = useRouter();
   if (connectors.isLoading || agents.isLoading) return <div className="page"><LoadingState label="Checking your Tracey workspace" /></div>;
   if (connectors.error || agents.error) return <div className="page"><ErrorState error={connectors.error ?? agents.error} onRetry={() => { void connectors.refetch(); void agents.refetch(); }} /></div>;
   const list = connectors.data?.connectors ?? [];
+  const registeredServices = new Set(registeredAgents.map(({ serviceName }) => serviceName));
+  const executionObserved = (executions.data?.executions.some(({ serviceName }) => registeredServices.has(serviceName)) ?? false)
+    || (hasCodex && (recentCodex.data?.conversations.length ?? 0) > 0);
   const steps = [
     { title: "Connect observability", description: "Give Tracey access to traces, logs, and metrics in SigNoz.", done: list.some(({ id, state }) => id === "signoz" && state === "ready"), path: "/connectors?connector=signoz" },
     { title: "Connect infrastructure", description: "Validate Kubernetes investigation and approved execution permissions.", done: list.some(({ id, state }) => id === "kubernetes" && state === "ready"), path: "/connectors?connector=kubernetes" },
-    { title: "Register an agent", description: "Identify a Codex, Claude Code, or OpenTelemetry service to monitor.", done: (agents.data?.agents.length ?? 0) > 0, path: "/agents?register=true" },
-    { title: "Validate telemetry", description: "Open a registered agent and confirm production runs are arriving.", done: false, path: "/agents" },
-    { title: "Run the first investigation", description: "Ask Tracey a grounded question about your connected systems.", done: false, path: "/investigations?new=true" },
+    { title: "Connect an agent", description: "Configure Codex, Claude Code, or a custom OpenTelemetry agent and register its observed identity.", done: registeredAgents.length > 0, path: "/agents?register=true" },
+    { title: "Validate telemetry", description: "Confirm that Tracey can query at least one real execution from a connected agent.", done: executionObserved, path: executionObserved ? "/runs" : "/agents?register=true" },
+    { title: "Run the first investigation", description: "Ask Tracey a grounded question about your connected systems.", done: (investigations.data?.investigations.length ?? 0) > 0, path: "/investigations?new=true" },
   ];
   const completed = steps.filter(({ done }) => done).length;
   return <div className="page onboarding-page">
