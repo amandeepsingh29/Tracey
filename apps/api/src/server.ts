@@ -12,7 +12,7 @@ import {
   TraceSearchSchema,
 } from "@tracey/domain";
 import { AutonomyPolicySchema, RemediationPlanSchema } from "@tracey/autonomy";
-import { buildConnectorRegistry, ConnectorIdSchema } from "@tracey/connectors";
+import { buildAgentOnboardingSources, buildConnectorRegistry, ConnectorIdSchema } from "@tracey/connectors";
 import { recordExternalAgentFeedback } from "@tracey/instrumentation";
 import { InvestigationNotFoundError, InvestigationService } from "@tracey/investigation";
 import {
@@ -160,6 +160,43 @@ export function buildServer(config: AppConfig) {
   const connectorRegistry = () => buildConnectorRegistry({ signozConfigured: Boolean(signoz),
     kubernetesInvestigatorEnabled: kubernetesRuntime.investigatorEnabled, kubernetesExecutorConfigured: actionExecutor.configured(),
     otlpConfigured: Boolean(config.OTEL_EXPORTER_OTLP_ENDPOINT), mcpClientConfigured: Boolean(mcpClient), mcpServerConfigured: Boolean(traceyMcp) });
+  const connectorDescriptors = async () => {
+    const configurations = store ? await store.listConnectorConfigs(config.TRACEY_TENANT_ID) : [];
+    return connectorRegistry().map((descriptor) => {
+      const saved = configurations.find((item) => item.connectorId === descriptor.id);
+      return saved ? {
+        ...descriptor,
+        state: saved.enabled ? (saved.status === "ready" ? "ready" as const : "needs_configuration" as const) : "disabled" as const,
+        statusReason: saved.latestError ?? descriptor.statusReason,
+        configuration: {
+          configured: true,
+          enabled: saved.enabled,
+          status: saved.status,
+          secretNames: saved.secretNames,
+          effectiveIdentity: saved.effectiveIdentity,
+          lastCheckedAt: saved.lastCheckedAt,
+          latestError: saved.latestError,
+          publicConfig: saved.publicConfig,
+          updatedAt: saved.updatedAt,
+        },
+      } : descriptor;
+    });
+  };
+  const agentOnboardingSources = async () => buildAgentOnboardingSources(await connectorDescriptors());
+  const connectedProducerTypes = async () => new Set((await agentOnboardingSources()).map(({ producerType }) => producerType));
+  const listConnectedAgents = async (limit: number) => {
+    if (!store) return [];
+    const available = await connectedProducerTypes();
+    return (await store.listAgents(config.TRACEY_TENANT_ID, limit)).filter(({ producerType }) => available.has(producerType));
+  };
+  const getConnectedAgent = async (agentId: string) => {
+    if (!store) return undefined;
+    const [agent, available] = await Promise.all([
+      store.getAgent(config.TRACEY_TENANT_ID, agentId),
+      connectedProducerTypes(),
+    ]);
+    return agent && available.has(agent.producerType) ? agent : undefined;
+  };
   const vaultMaterial = config.TRACEY_CONNECTOR_ENCRYPTION_KEY ?? config.TRACEY_API_BEARER_TOKEN;
   const connectorVault = vaultMaterial && vaultMaterial.length >= 24 ? new ConnectorSecretVault(vaultMaterial) : undefined;
   const rebuildRuntime = () => {
@@ -168,12 +205,17 @@ export function buildServer(config: AppConfig) {
     investigations = signoz ? new InvestigationService(signoz) : undefined;
     agentic = store && investigations && config.OPENROUTER_API_KEY ? new AgenticInvestigator({ apiKey: config.OPENROUTER_API_KEY, baseUrl: config.OPENROUTER_BASE_URL,
       model: config.TRACEY_AGENT_MODEL, timeoutMs: config.TRACEY_AGENT_TIMEOUT_MS, tenantId: config.TRACEY_TENANT_ID, environment: config.DEPLOYMENT_ENVIRONMENT,
-      allowedNamespaces: kubernetesRuntime.allowedNamespaces, allowedWorkloads: kubernetesRuntime.allowedWorkloads }, investigations, store, autonomy) : undefined;
+      allowedNamespaces: kubernetesRuntime.allowedNamespaces, allowedWorkloads: kubernetesRuntime.allowedWorkloads }, investigations, store, autonomy, {
+        list: listConnectedAgents,
+        get: getConnectedAgent,
+        enabledProducerTypes: connectedProducerTypes,
+      }) : undefined;
   };
+  rebuildRuntime();
   const connectorConfigurationSchema = z.discriminatedUnion("connectorId", [
     z.object({ connectorId: z.literal("signoz"), configuration: z.object({ apiUrl: z.string().url(), apiKey: z.string().min(1).max(4_000), otlpEndpoint: z.string().url().optional(), ingestionKey: z.string().max(4_000).optional() }) }),
     z.object({ connectorId: z.literal("kubernetes"), configuration: z.object({ investigatorEnabled: z.boolean().default(true), executorEnabled: z.boolean().default(false), allowedNamespaces: z.array(z.string().trim().min(1).max(253)).min(1).max(100), allowedWorkloads: z.array(z.string().trim().min(1).max(253)).max(500).default([]) }) }),
-    z.object({ connectorId: z.enum(["codex", "claude-code", "generic-otel"]), configuration: z.object({ serviceName: z.string().trim().min(1).max(255), environment: z.string().trim().min(1).max(100).default(config.DEPLOYMENT_ENVIRONMENT) }) }),
+    z.object({ connectorId: z.enum(["codex", "claude-code", "generic-otel"]), configuration: z.object({ environment: z.string().trim().min(1).max(100).default(config.DEPLOYMENT_ENVIRONMENT) }) }),
     z.object({ connectorId: z.literal("mcp"), configuration: z.object({ serverUrl: z.string().url(), bearerToken: z.string().max(4_000).optional(), allowedReadTools: z.array(z.string().trim().min(1).max(200)).max(200).default([]) }) }),
   ]);
   const applyStoredConnector = (record: ConnectorConfigRecord) => {
@@ -202,7 +244,7 @@ export function buildServer(config: AppConfig) {
     }
     if (input.connectorId === "codex" || input.connectorId === "claude-code" || input.connectorId === "generic-otel") {
       if (!signoz) throw new Error("Connect SigNoz before validating an agent producer");
-      return { effectiveIdentity: `OTLP service ${input.configuration.serviceName}` };
+      return { effectiveIdentity: `${input.connectorId} producer profile` };
     }
     const mcpConfiguration = z.object({ serverUrl: z.string().url(), bearerToken: z.string().optional(), allowedReadTools: z.array(z.string()) }).parse(input.configuration);
     const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), config.MCP_CONNECT_TIMEOUT_MS);
@@ -277,9 +319,8 @@ export function buildServer(config: AppConfig) {
   }));
 
   server.get("/v1/connectors", { preHandler: apiAuth }, async () => {
-    const configurations = store ? await store.listConnectorConfigs(config.TRACEY_TENANT_ID) : [];
-    return { connectors: connectorRegistry().map((descriptor) => { const saved = configurations.find((item) => item.connectorId === descriptor.id); return saved ? { ...descriptor, state: saved.enabled ? (saved.status === "ready" ? "ready" : "needs_configuration") : "disabled", statusReason: saved.latestError ?? descriptor.statusReason,
-      configuration: { configured: true, enabled: saved.enabled, status: saved.status, secretNames: saved.secretNames, effectiveIdentity: saved.effectiveIdentity, lastCheckedAt: saved.lastCheckedAt, latestError: saved.latestError, publicConfig: saved.publicConfig, updatedAt: saved.updatedAt } } : descriptor; }),
+    const connectors = await connectorDescriptors();
+    return { connectors, agentOnboardingSources: buildAgentOnboardingSources(connectors),
       boundary: "External agents and platforms remain independently deployed; Tracey connects through bounded adapters.", secretStorageAvailable: Boolean(store && connectorVault) };
   });
 
@@ -859,12 +900,29 @@ export function buildServer(config: AppConfig) {
         error: "DATABASE_URL is required; Tracey does not keep an in-memory production agent registry",
       });
     }
-    const parsed = AgentRegistrationRequestSchema.safeParse(request.body);
+    const parsed = z.object({
+      sourceId: z.string().trim().min(1).max(128),
+      displayName: z.string().trim().min(1).max(128),
+      serviceName: z.string().trim().min(1).max(255),
+      environment: z.string().trim().min(1).max(128),
+    }).safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: "Invalid agent registration", issues: parsed.error.issues });
     }
     try {
-      const registered = await store.registerAgent(config.TRACEY_TENANT_ID, parsed.data);
+      const source = (await agentOnboardingSources()).find(({ sourceId }) => sourceId === parsed.data.sourceId);
+      if (!source) {
+        return reply.code(409).send({ error: "The selected agent producer connector is not enabled" });
+      }
+      const registration = AgentRegistrationRequestSchema.parse({
+        displayName: parsed.data.displayName,
+        serviceName: parsed.data.serviceName,
+        producerType: source.producerType,
+        environment: parsed.data.environment,
+        normalizationProfile: source.normalizationProfile,
+        telemetryContractVersion: source.telemetryContractVersion,
+      });
+      const registered = await store.registerAgent(config.TRACEY_TENANT_ID, registration);
       return reply.code(201).send(registered);
     } catch (error) {
       request.log.error({ err: error }, "Agent registration failed");
@@ -883,7 +941,7 @@ export function buildServer(config: AppConfig) {
       return reply.code(400).send({ error: "Invalid agent list query", issues: parsed.error.issues });
     }
     try {
-      return { agents: await store.listAgents(config.TRACEY_TENANT_ID, parsed.data.limit) };
+      return { agents: await listConnectedAgents(parsed.data.limit) };
     } catch (error) {
       request.log.error({ err: error }, "Agent registry query failed");
       return reply.code(503).send({ error: "The production agent registry is unavailable" });
@@ -992,7 +1050,7 @@ export function buildServer(config: AppConfig) {
     }).refine(({ start, end }) => start < end && end - start <= 7 * 86_400_000, "time range must be between one millisecond and seven days").safeParse(query);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid execution feed query", issues: parsed.error.issues });
 
-    const registered = store ? (await store.listAgents(config.TRACEY_TENANT_ID, 100)).filter(({ status }) => status === "active") : [];
+    const registered = (await listConnectedAgents(100)).filter(({ status }) => status === "active");
     type SourceResult = {
       source: {
         sourceId: string;
@@ -1249,6 +1307,9 @@ export function buildServer(config: AppConfig) {
       const agent = await store.getAgent(config.TRACEY_TENANT_ID, parsed.data.agentId);
       if (!agent || agent.status !== "active") {
         return reply.code(404).send({ error: "Active registered agent not found" });
+      }
+      if (!(await connectedProducerTypes()).has(agent.producerType)) {
+        return reply.code(409).send({ error: "The registered agent producer connector is not enabled" });
       }
       if (agent.environment !== config.DEPLOYMENT_ENVIRONMENT) {
         return reply.code(409).send({ error: "Agent environment does not match the configured SigNoz scope" });

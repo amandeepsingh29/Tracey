@@ -98,7 +98,23 @@ describe("integration configuration gates", () => {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.json().connectors.map(({ id }: { id: string }) => id),
       ["signoz", "kubernetes", "codex", "claude-code", "generic-otel", "mcp"]);
+    assert.deepEqual(response.json().agentOnboardingSources, []);
     assert.equal(JSON.stringify(response.json()).toLowerCase().includes("notes-app"), false);
+  });
+
+  it("derives agent onboarding sources from ready connectors and defaults to generic OpenTelemetry", async () => {
+    const server = buildServer({
+      ...config,
+      SIGNOZ_API_URL: "http://127.0.0.1:9",
+      SIGNOZ_API_KEY: "catalog-only-key",
+    });
+    const response = await server.inject({ method: "GET", url: "/v1/connectors", headers: apiHeaders });
+    await server.close();
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json().agentOnboardingSources.map(({ sourceId }: { sourceId: string }) => sourceId), ["generic-otel"]);
+    assert.equal(response.json().connectors.find(({ id }: { id: string }) => id === "codex").state, "needs_configuration");
+    assert.equal(response.json().connectors.find(({ id }: { id: string }) => id === "claude-code").state, "needs_configuration");
   });
 
   it("keeps product data contracts authenticated and refuses fabricated incident data", async () => {

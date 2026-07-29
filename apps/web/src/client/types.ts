@@ -19,6 +19,28 @@ export type Connector = {
   };
 };
 
+export type AgentOnboardingSource = {
+  sourceId: string;
+  connectorId: "codex" | "claude-code" | "generic-otel";
+  producerType: Agent["producerType"];
+  displayName: string;
+  description: string;
+  serviceNameSuggestion: string;
+  displayNameSuggestion: string;
+  normalizationProfile: string;
+  telemetryContractVersion: string;
+  instructions: string[];
+  configurationTemplate: string;
+  isDefault: boolean;
+};
+
+export type ConnectorCatalog = {
+  connectors: Connector[];
+  agentOnboardingSources: AgentOnboardingSource[];
+  boundary: string;
+  secretStorageAvailable: boolean;
+};
+
 export type Agent = {
   agentId: string;
   displayName: string;
@@ -30,6 +52,13 @@ export type Agent = {
   status: "active" | "paused";
   createdAt: string;
   updatedAt: string;
+};
+
+export type AgentConnectionRequest = {
+  sourceId: string;
+  displayName: string;
+  serviceName: string;
+  environment: string;
 };
 
 export type KubernetesDeploymentSummary = {

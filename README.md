@@ -6,7 +6,7 @@ Tracey is a production-agent observability control plane built on OpenTelemetry 
 
 Tracey also includes an evidence-bound agentic investigator, persistent chat, production triggers, distributed polling workers, an in-product notification center at `/notifs`, OIDC/RBAC, five autonomy modes, a deterministic policy engine, a separately deployed authenticated executor, and verified recovery. The default operator posture is approval-first: Tracey can prepare broad cloud changes, but pauses every mutation for confirmation. See [docs/agentic-layer.md](docs/agentic-layer.md).
 
-Read the website-ready [product page](PRODUCT_PAGE.md), the authoritative [product requirements](PRD.md), and the [contribution guide](CONTRIBUTING.md).
+Read the current [product TODO](TODO.md), the [connector documentation](docs/connectors/README.md), and the [contribution guide](CONTRIBUTING.md).
 
 ## Product boundary
 
@@ -126,19 +126,17 @@ Runtime process metadata and logs live under ignored `.tracey/`. Shutdown signal
 
 ## Onboard a production agent
 
-Register the telemetry identity Tracey should expect. Tenant scope comes from authenticated server context and is never accepted from the request body.
+Enable an agent-producer connector, then register the telemetry identity Tracey should expect. The connector supplies the producer type, normalizer, and telemetry contract; clients cannot override those values. Tenant scope comes from authenticated server context and is never accepted from the request body.
 
 ```bash
 curl --fail-with-body \
   -H "authorization: Bearer $TRACEY_API_BEARER_TOKEN" \
   -H 'content-type: application/json' \
   -d '{
-    "displayName":"Production Codex",
-    "serviceName":"codex-app-server",
-    "producerType":"codex_desktop",
-    "environment":"production",
-    "normalizationProfile":"codex-otel-0.144@1",
-    "telemetryContractVersion":"tracey-agent-run@1"
+    "sourceId":"generic-otel",
+    "displayName":"Support Agent",
+    "serviceName":"support-agent-api",
+    "environment":"production"
   }' \
   http://localhost:3000/v1/agents
 ```
@@ -159,7 +157,7 @@ curl --fail-with-body \
   "http://localhost:3000/v1/agents/<agent-id>/runs?start=$start&end=$end"
 ```
 
-Tracey loads the tenant-scoped registration from PostgreSQL and selects the fixed producer normalizer. Claude Code maps `claude_code.interaction` roots to stable `claude:<trace-id>` run IDs without changing the native spans stored in SigNoz. Codex is conversation-event based, so its registered identity is queried through the exact-conversation endpoint below rather than pretending it emits native `agent.run` roots.
+Tracey returns onboarding sources from the enabled connector registry. Generic OpenTelemetry is the default when the telemetry path is ready; Codex and Claude Code do not appear until their connectors are explicitly enabled. Tracey loads the tenant-scoped registration from PostgreSQL and selects the fixed producer normalizer. Claude Code maps `claude_code.interaction` roots to stable `claude:<trace-id>` run IDs without changing the native spans stored in SigNoz. Codex is conversation-event based, so its registered identity is normalized without pretending it emits native `agent.run` roots.
 
 PostgreSQL row-level security and parameterized queries provide a second tenant boundary beneath the API scope. See [docs/postgres-storage.md](docs/postgres-storage.md).
 

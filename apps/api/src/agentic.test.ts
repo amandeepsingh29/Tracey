@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { AgentProducerType } from "@tracey/domain";
 import type { InvestigationService } from "@tracey/investigation";
 import type { InvestigationMessage, PostgresStore } from "@tracey/postgres-store";
 import type { AutonomyService } from "./autonomy-service.js";
-import { AgenticInvestigator, agentToolNames, collectCitableEvidence, durableProposalMessage, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
+import { AgenticInvestigator, agentToolNames, agentToolNamesForProducerTypes, collectCitableEvidence, durableProposalMessage, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
 
 describe("bounded agentic investigator", () => {
   it("exposes remediation planning but no direct mutation adapter tools", () => {
@@ -16,6 +17,14 @@ describe("bounded agentic investigator", () => {
     for (const direct of ["restart_pod", "rollback_deployment", "scale_deployment", "edit_memory_limit", "edit_env_var"]) {
       assert.equal(agentToolNames.includes(direct), false);
     }
+  });
+
+  it("hides producer-specific tools when that connector is not enabled", () => {
+    const genericTools = agentToolNamesForProducerTypes(new Set<AgentProducerType>(["custom_otel"]));
+    assert.equal(genericTools.includes("search_codex_logs"), false);
+    assert.equal(genericTools.includes("investigate_codex_conversation"), false);
+    assert.equal(genericTools.includes("search_failed_agent_runs"), true);
+    assert.equal(agentToolNamesForProducerTypes(new Set<AgentProducerType>(["codex_desktop"])).includes("search_codex_logs"), true);
   });
 
   it("recognizes incomplete promises that must not end an investigation", () => {

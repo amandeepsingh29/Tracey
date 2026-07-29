@@ -1,4 +1,4 @@
-import type { AgentProducerType } from "@tracey/domain";
+import type { AgentProducerType, AgentRegistration } from "@tracey/domain";
 import type { InvestigationService } from "@tracey/investigation";
 import type { ActionProposal, InvestigationMessage, PostgresStore } from "@tracey/postgres-store";
 import { KubernetesAdapter } from "@tracey/cloud-adapter";
@@ -481,6 +481,13 @@ const toolDefinitions = [
   },
 ] as const;
 export const agentToolNames: string[] = toolDefinitions.map(({ function: definition }) => definition.name);
+export function agentToolNamesForProducerTypes(enabledProducerTypes?: Set<AgentProducerType>) {
+  const codexEnabled = !enabledProducerTypes
+    || enabledProducerTypes.has("codex_desktop")
+    || enabledProducerTypes.has("codex_cli");
+  return agentToolNames.filter((name) =>
+    codexEnabled || (name !== "investigate_codex_conversation" && name !== "search_codex_logs"));
+}
 
 const CodexToolArgumentsSchema = z.object({
   conversationId: z.string().uuid(),
@@ -875,6 +882,12 @@ export interface AgenticInvestigatorConfig {
   allowedWorkloads?: string[];
 }
 
+export interface ConnectedAgentRegistry {
+  list(limit: number): Promise<AgentRegistration[]>;
+  get(agentId: string): Promise<AgentRegistration | undefined>;
+  enabledProducerTypes(): Promise<Set<AgentProducerType>>;
+}
+
 export class AgenticInvestigator {
   private readonly cloudAdapter: KubernetesAdapter;
 
@@ -883,6 +896,7 @@ export class AgenticInvestigator {
     private readonly investigations: InvestigationService,
     private readonly store: PostgresStore,
     private readonly autonomy?: AutonomyService,
+    private readonly connectedAgents?: ConnectedAgentRegistry,
   ) {
     this.cloudAdapter = new KubernetesAdapter({
       ...(config.allowedNamespaces?.length ? { allowedNamespaces: config.allowedNamespaces } : {}),
@@ -896,6 +910,14 @@ export class AgenticInvestigator {
 
   async listMessages(sessionId: string) {
     return this.store.listInvestigationMessages(this.config.tenantId, sessionId);
+  }
+
+  private listAgents(limit: number) {
+    return this.connectedAgents?.list(limit) ?? this.store.listAgents(this.config.tenantId, limit);
+  }
+
+  private getAgent(agentId: string) {
+    return this.connectedAgents?.get(agentId) ?? this.store.getAgent(this.config.tenantId, agentId);
   }
 
   async chat(sessionId: string, userInput: string, actor: AgenticActorContext = { subject: "tracey-agent", roles: ["analyst"] }) {
@@ -1084,11 +1106,14 @@ export class AgenticInvestigator {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs ?? 60_000);
     try {
+      const enabledProducerTypes = this.connectedAgents ? await this.connectedAgents.enabledProducerTypes() : undefined;
+      const visibleToolNames = new Set(agentToolNamesForProducerTypes(enabledProducerTypes));
+      const visibleTools = toolDefinitions.filter(({ function: definition }) => visibleToolNames.has(definition.name));
       const response = await fetch(`${(this.config.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "")}/chat/completions`, {
         method: "POST", signal: controller.signal,
         headers: { authorization: `Bearer ${this.config.apiKey}`, "content-type": "application/json", "X-Title": "Tracey" },
         body: JSON.stringify({ model: this.config.model, messages,
-          ...(allowTools ? { tools: toolDefinitions, tool_choice: "auto" } : {}),
+          ...(allowTools ? { tools: visibleTools, tool_choice: "auto" } : {}),
           temperature: 0.1,
           max_tokens: allowTools ? 2_000 : 4_000,
           reasoning: { enabled: allowTools },
@@ -1106,7 +1131,7 @@ export class AgenticInvestigator {
       case "resolve_application_status": {
         const args = z.object({ query: z.string().trim().min(1).max(256) }).parse(value);
         const [agents, namespaces] = await Promise.all([
-          this.store.listAgents(this.config.tenantId, 100),
+          this.listAgents(100),
           this.config.allowedNamespaces?.includes("*")
             ? this.cloudAdapter.listNamespaces()
             : Promise.resolve(this.config.allowedNamespaces ?? []),
@@ -1150,11 +1175,11 @@ export class AgenticInvestigator {
       }
       case "list_agents": {
         const args = z.object({ limit: z.number().int().min(1).max(100).default(50) }).parse(value);
-        return { agents: await this.store.listAgents(this.config.tenantId, args.limit) };
+        return { agents: await this.listAgents(args.limit) };
       }
       case "get_agent_deployment": {
         const args = z.object({ agentId: z.string().uuid() }).parse(value);
-        const agent = await this.store.getAgent(this.config.tenantId, args.agentId);
+        const agent = await this.getAgent(args.agentId);
         if (!agent || agent.status !== "active") throw new Error("Active registered agent not found");
         const mapping = await this.store.getAgentDeploymentMapping(this.config.tenantId, args.agentId);
         if (!mapping) throw new Error("The agent is not linked to a Kubernetes Deployment");
@@ -1172,7 +1197,7 @@ export class AgenticInvestigator {
         }).parse(value);
         const end = Date.now();
         const start = end - args.lookbackMinutes * 60_000;
-        const registered = (await this.store.listAgents(this.config.tenantId, 100))
+        const registered = (await this.listAgents(100))
           .filter((agent) => agent.status === "active");
         const agents = await Promise.all(registered.map(async (agent) => {
           const identity = {
@@ -1429,7 +1454,7 @@ export class AgenticInvestigator {
         if (!this.autonomy) throw new Error("The remediation policy service is not configured");
         let plan = RemediationPlanSchema.parse(value);
         if (OBSERVABILITY_VERIFIED_ACTIONS.has(plan.action.type)) {
-          const agents = (await this.store.listAgents(this.config.tenantId, 100))
+          const agents = (await this.listAgents(100))
             .filter(({ status }) => status === "active");
           const mappedServiceNames = new Set<string>();
           await Promise.all(agents.map(async (agent) => {

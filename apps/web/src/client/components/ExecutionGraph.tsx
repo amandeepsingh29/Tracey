@@ -50,7 +50,7 @@ export function ExecutionGraphDetail({
       <MetricCard icon={ListTree} label="Observed steps" value={graph.nodes.length} detail={`${tools} tool call${tools === 1 ? "" : "s"}`} />
       <MetricCard icon={XCircle} label="Failed steps" value={failed} detail={failed ? "Failure content available" : "No observed failures"} tone={failed ? "danger" : "default"} />
       <MetricCard icon={Clock3} label="Duration" value={duration(graph.durationMs)} detail={`${dateTime(graph.startedAt)} start`} />
-      <MetricCard icon={GitBranch} label="Evidence" value={`${Math.round(graph.evidenceCompleteness * 100)}%`} detail={graph.contentSource === "local_session" ? graph.evidence.length ? "SigNoz + local Codex" : "Local Codex session" : "SigNoz telemetry only"} />
+      <MetricCard icon={GitBranch} label="Evidence" value={`${Math.round(graph.evidenceCompleteness * 100)}%`} detail={graph.contentSource === "local_session" ? graph.evidence.length ? "SigNoz + local session" : "Local execution session" : "SigNoz telemetry only"} />
     </div>
 
     <div className={`forensic-strip ${graph.sensitiveValuesIncluded ? "forensic-strip-revealed" : ""}`}>
@@ -59,7 +59,7 @@ export function ExecutionGraphDetail({
         <strong>{graph.sensitiveValuesIncluded ? "Sensitive values visible for this session" : "Local forensic content connected"}</strong>
         <p>{graph.contentSource === "local_session"
           ? `${sensitive} step${sensitive === 1 ? "" : "s"} contain credential-like values. Prompts, responses, commands and outputs are otherwise shown in full.`
-          : "The local Codex session was not found, so this graph contains only telemetry emitted to SigNoz."}</p>
+          : "The local execution session was not found, so this graph contains only telemetry emitted to SigNoz."}</p>
       </div>
       {graph.contentSource === "local_session" && sensitive > 0 && (graph.sensitiveValuesIncluded
         ? <Button variant="secondary" onClick={onHideSensitive} disabled={refreshingSensitive}><EyeOff />Hide sensitive values</Button>
@@ -67,7 +67,7 @@ export function ExecutionGraphDetail({
     </div>
 
     {confirmReveal && !graph.sensitiveValuesIncluded && <div className="forensic-confirmation">
-      <div><ShieldAlert /><span><strong>Reveal credential and authentication material?</strong><small>Values will be fetched from the local Codex session and rendered in this browser. They are not sent to SigNoz or Tracey’s model.</small></span></div>
+      <div><ShieldAlert /><span><strong>Reveal credential and authentication material?</strong><small>Values will be fetched from the local execution session and rendered in this browser. They are not sent to SigNoz or Tracey’s model.</small></span></div>
       <footer><Button variant="ghost" onClick={() => setConfirmReveal(false)}>Cancel</Button><Button onClick={() => { setConfirmReveal(false); onRevealSensitive(); }} disabled={refreshingSensitive}><KeyRound />Reveal for this session</Button></footer>
     </div>}
 
@@ -99,17 +99,17 @@ export function ExecutionGraphDetail({
       <Panel className="execution-node-inspector" title="Step details" subtitle="Complete developer-facing content for the selected step.">
         {selected ? <div className="node-inspector-body">
           <header><span className="tree-node-icon"><NodeIcon kind={selected.kind} /></span><div><small>{titleCase(selected.kind)}</small><h3>{selected.label}</h3></div><StatusChip value={selected.status} /></header>
-          <dl><div><dt>Observed at</dt><dd>{dateTime(selected.timestamp)}</dd></div><div><dt>Source</dt><dd>{selected.source === "codex_session" ? "Local Codex session" : "SigNoz"}</dd></div>{selected.durationMs !== undefined && <div><dt>Duration</dt><dd>{duration(selected.durationMs)}</dd></div>}<div><dt>Sensitive content</dt><dd>{selected.sensitive ? graph.sensitiveValuesIncluded ? "Visible" : "Protected" : "None detected"}</dd></div></dl>
+          <dl><div><dt>Observed at</dt><dd>{dateTime(selected.timestamp)}</dd></div><div><dt>Source</dt><dd>{selected.source === "codex_session" ? "Local execution session" : "SigNoz"}</dd></div>{selected.durationMs !== undefined && <div><dt>Duration</dt><dd>{duration(selected.durationMs)}</dd></div>}<div><dt>Sensitive content</dt><dd>{selected.sensitive ? graph.sensitiveValuesIncluded ? "Visible" : "Protected" : "None detected"}</dd></div></dl>
           {selected.content ? <pre className="execution-content">{selected.content}</pre> : <p className="content-unavailable">This producer did not emit content for this step.</p>}
           <JsonView value={selected.attributes} label="Step attributes and raw record" />
         </div> : <p className="content-unavailable">Select a graph node to inspect it.</p>}
       </Panel>
     </div>}
 
-    {view === "timeline" && <Panel title="Execution timeline" subtitle="Every observed local or telemetry event in timestamp order."><div className="table-wrap"><table className="execution-timeline"><thead><tr><th>Time</th><th>Step</th><th>Status</th><th>Duration</th><th>Source</th></tr></thead><tbody>{graph.nodes.map((node) => <tr key={node.nodeId} onClick={() => { setSelectedId(node.nodeId); setView("graph"); }}><td>{dateTime(node.timestamp)}</td><td><strong>{node.label}</strong><small>{node.summary}</small></td><td><StatusChip value={node.status} /></td><td>{node.durationMs === undefined ? "—" : duration(node.durationMs)}</td><td>{node.source === "codex_session" ? "Local Codex" : "SigNoz"}</td></tr>)}</tbody></table></div></Panel>}
+    {view === "timeline" && <Panel title="Execution timeline" subtitle="Every observed local or telemetry event in timestamp order."><div className="table-wrap"><table className="execution-timeline"><thead><tr><th>Time</th><th>Step</th><th>Status</th><th>Duration</th><th>Source</th></tr></thead><tbody>{graph.nodes.map((node) => <tr key={node.nodeId} onClick={() => { setSelectedId(node.nodeId); setView("graph"); }}><td>{dateTime(node.timestamp)}</td><td><strong>{node.label}</strong><small>{node.summary}</small></td><td><StatusChip value={node.status} /></td><td>{node.durationMs === undefined ? "—" : duration(node.durationMs)}</td><td>{node.source === "codex_session" ? "Local session" : "SigNoz"}</td></tr>)}</tbody></table></div></Panel>}
 
     {view === "evidence" && <div className="two-column execution-evidence">
-      <Panel title="Source evidence" subtitle={`${graph.evidence.length} Codex telemetry references attached to this turn.`}><div className="evidence-reference-list">{graph.evidence.map((reference, index) => <div key={`${reference.sourceTraceId}:${reference.sourceSpanId ?? index}`}><span><GitBranch /></span><div><strong>{reference.eventName}</strong><small>{dateTime(reference.timestamp)}</small><code>{reference.sourceTraceId}{reference.sourceSpanId ? ` · ${reference.sourceSpanId}` : ""}</code></div></div>)}</div></Panel>
+      <Panel title="Source evidence" subtitle={`${graph.evidence.length} telemetry references attached to this turn.`}><div className="evidence-reference-list">{graph.evidence.map((reference, index) => <div key={`${reference.sourceTraceId}:${reference.sourceSpanId ?? index}`}><span><GitBranch /></span><div><strong>{reference.eventName}</strong><small>{dateTime(reference.timestamp)}</small><code>{reference.sourceTraceId}{reference.sourceSpanId ? ` · ${reference.sourceSpanId}` : ""}</code></div></div>)}</div></Panel>
       <Panel title="Evidence limits" subtitle="Tracey states where correlation is incomplete instead of inventing causality."><div className="limitation-list">{graph.limitations.length ? graph.limitations.map((limitation) => <p key={limitation}><ShieldAlert />{limitation}</p>) : <p><CheckCircle2 />No evidence limitations were reported for this turn.</p>}</div></Panel>
     </div>}
 

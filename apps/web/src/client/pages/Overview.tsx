@@ -23,31 +23,33 @@ export function OverviewPage() {
     { queryKey: ["investigations"], queryFn: api.investigations, retry: false },
   ] });
   const [health, connectors, agents, actions, notifications, investigations] = results;
-  const eligibleAgents = (agents.data?.agents ?? []).filter((agent) => (environment === "all" || agent.environment === environment) && !["codex_desktop", "codex_cli"].includes(agent.producerType));
   const windowMs = rangeHours * 3_600_000;
-  const runQueries = useQueries({ queries: eligibleAgents.map((agent) => ({ queryKey: ["overview-runs", agent.agentId, rangeHours, now], queryFn: () => api.agentRuns(agent.agentId, { start: now - 2 * windowMs, end: now, limit: 100 }), retry: false })) });
+  const executions = useQuery({
+    queryKey: ["overview-executions", rangeHours, now],
+    queryFn: () => api.executions(now - Math.min(2 * windowMs, 7 * 86_400_000), now, 500),
+    enabled: (agents.data?.agents.length ?? 0) > 0,
+    retry: false,
+  });
   if (results.every((result) => result.isLoading)) return <div className="page"><LoadingState /></div>;
-  const firstError = results.find((result) => result.error)?.error;
+  const firstError = results.find((result) => result.error)?.error ?? executions.error;
   const connectorList = (connectors.data?.connectors ?? []).filter(({ id }) => id !== "mcp");
   const agentList = agents.data?.agents ?? [];
   const actionList = actions.data?.actions ?? [];
   const notificationList = notifications.data?.notifications ?? [];
   const investigationList = investigations.data?.investigations ?? [];
-  const observedRuns = runQueries.flatMap((query) => query.data?.runs ?? []);
-  const runTime = (run: typeof observedRuns[number]) => new Date(String(run.startedAt ?? run.startTime ?? 0)).getTime();
+  const observedRuns = (executions.data?.executions ?? []).filter((execution) => environment === "all" || execution.environment === environment);
+  const runTime = (run: typeof observedRuns[number]) => new Date(run.startedAt).getTime();
   const currentRuns = observedRuns.filter((run) => runTime(run) >= now - windowMs);
   const previousRuns = observedRuns.filter((run) => runTime(run) < now - windowMs);
-  const isFailure = (run: typeof observedRuns[number]) => ["error", "failed", "failure"].includes(String(run.status ?? run.outcome).toLowerCase());
+  const isFailure = (run: typeof observedRuns[number]) => run.status === "failed";
   const failureRate = (runs: typeof observedRuns) => runs.length ? runs.filter(isFailure).length / runs.length : 0;
   const failureDelta = (failureRate(currentRuns) - failureRate(previousRuns)) * 100;
   const latencies = currentRuns.map((run) => Number(run.durationMs ?? 0)).filter((value) => value > 0).sort((a, b) => a - b);
   const p95 = latencies[Math.max(0, Math.ceil(latencies.length * .95) - 1)] ?? 0;
   const previousLatencies = previousRuns.map((run) => Number(run.durationMs ?? 0)).filter((value) => value > 0).sort((a, b) => a - b);
   const previousP95 = previousLatencies[Math.max(0, Math.ceil(previousLatencies.length * .95) - 1)] ?? 0;
-  const tokens = currentRuns.reduce((sum, run) => sum + Number(run.tokenUsage?.total ?? 0), 0);
-  const previousTokens = previousRuns.reduce((sum, run) => sum + Number(run.tokenUsage?.total ?? 0), 0);
-  const cost = currentRuns.reduce((sum, run) => sum + Number(run.costNanoUsd ?? 0), 0) / 1_000_000_000;
-  const previousCost = previousRuns.reduce((sum, run) => sum + Number(run.costNanoUsd ?? 0), 0) / 1_000_000_000;
+  const tokens = currentRuns.reduce((sum, run) => sum + Number(run.inputTokens ?? 0) + Number(run.outputTokens ?? 0), 0);
+  const previousTokens = previousRuns.reduce((sum, run) => sum + Number(run.inputTokens ?? 0) + Number(run.outputTokens ?? 0), 0);
   const pending = actionList.filter(({ status }) => status === "awaiting_approval").length;
   const failed = actionList.filter(({ status }) => ["failed", "revert_failed"].includes(status)).length;
   const recovered = actionList.filter(({ status }) => ["reverted", "succeeded"].includes(status)).length;
@@ -55,8 +57,8 @@ export function OverviewPage() {
   const needsSetup = agentList.length === 0 || !connectorList.some(({ id, state }) => id === "signoz" && state === "ready");
 
   return <div className="page">
-    <PageHeader eyebrow="OPERATIONS OVERVIEW" title="Know what needs attention." description="Live agent reliability, change control, and connector health in one evidence-backed workspace." actions={<><select className="header-select" value={environment} onChange={(event) => setEnvironment(event.target.value)} aria-label="Environment"><option value="all">All environments</option>{[...new Set((agents.data?.agents ?? []).map((agent) => agent.environment))].map((value) => <option key={value}>{value}</option>)}</select><select className="header-select" value={rangeHours} onChange={(event) => setRangeHours(Number(event.target.value))} aria-label="Time range"><option value={1}>Last hour</option><option value={24}>Last 24 hours</option><option value={168}>Last 7 days</option></select><button className="button button-secondary" onClick={() => { setNow(Date.now()); void Promise.all(results.map((result) => result.refetch())); }}><Radar size={16} />Refresh live data</button></>} />
-    {firstError && <ErrorState error={firstError} onRetry={() => void Promise.all(results.map((result) => result.refetch()))} />}
+    <PageHeader eyebrow="OPERATIONS OVERVIEW" title="Know what needs attention." description="Live agent reliability, change control, and connector health in one evidence-backed workspace." actions={<><select className="header-select" value={environment} onChange={(event) => setEnvironment(event.target.value)} aria-label="Environment"><option value="all">All environments</option>{[...new Set((agents.data?.agents ?? []).map((agent) => agent.environment))].map((value) => <option key={value}>{value}</option>)}</select><select className="header-select" value={rangeHours} onChange={(event) => setRangeHours(Number(event.target.value))} aria-label="Time range"><option value={1}>Last hour</option><option value={24}>Last 24 hours</option><option value={168}>Last 7 days</option></select><button className="button button-secondary" onClick={() => { setNow(Date.now()); void Promise.all([...results.map((result) => result.refetch()), executions.refetch()]); }}><Radar size={16} />Refresh live data</button></>} />
+    {firstError && <ErrorState error={firstError} onRetry={() => void Promise.all([...results.map((result) => result.refetch()), executions.refetch()])} />}
     {needsSetup && <button className="setup-banner" onClick={() => router.push("/onboarding")}><div className="setup-icon"><Rocket /></div><div><strong>Finish setting up Tracey</strong><span>Connect telemetry, validate infrastructure, and register your first production agent.</span></div><ArrowRight /></button>}
     <section className="metrics-grid" aria-label="Operational metrics">
       <Link href="/agents"><MetricCard label="Connected agents" value={environment === "all" ? agentList.length : agentList.filter((agent) => agent.environment === environment).length} detail={agentList.length ? `${agentList.filter(({ status }) => status === "active").length} actively monitored` : "Register your first agent"} icon={Bot} /></Link>
@@ -66,7 +68,7 @@ export function OverviewPage() {
       <Link href="/connectors"><MetricCard label="Connector health" value={`${readyConnectors}/${connectorList.length || 0}`} detail={connectorList.some(({ state }) => state === "needs_configuration") ? "Setup needs attention" : "Connected systems ready"} icon={Cable} /></Link>
       <Link href="/changes"><MetricCard label="Verified outcomes" value={recovered} detail={failed ? `${failed} change failures recorded` : "No unresolved execution failures"} icon={ShieldCheck} tone={failed ? "danger" : "success"} /></Link>
       <Link href="/runs"><MetricCard label="P95 latency" value={p95 ? `${Math.round(p95)} ms` : "—"} detail={p95 && previousP95 ? `${(((p95 - previousP95) / previousP95) * 100).toFixed(1)}% vs previous window` : `${currentRuns.length} observed runs in range`} icon={Radar} /></Link>
-      <Link href="/runs"><MetricCard label="Tokens / cost" value={tokens ? tokens.toLocaleString() : "—"} detail={tokens && previousTokens ? `${(((tokens - previousTokens) / previousTokens) * 100).toFixed(1)}% tokens · $${cost.toFixed(4)} (${previousCost ? `${(((cost - previousCost) / previousCost) * 100).toFixed(1)}%` : "new"})` : cost ? `$${cost.toFixed(4)} estimated from emitted pricing` : "Cost not emitted"} icon={Bot} /></Link>
+      <Link href="/runs"><MetricCard label="Observed tokens" value={tokens ? tokens.toLocaleString() : "—"} detail={tokens && previousTokens ? `${(((tokens - previousTokens) / previousTokens) * 100).toFixed(1)}% vs previous window` : "Token counts appear only when producers emit them"} icon={Bot} /></Link>
     </section>
     <div className="two-column">
       <Panel title="Recent operational activity" subtitle="Real findings generated by investigations, policy decisions, and actions.">
@@ -88,17 +90,10 @@ export function OnboardingPage() {
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.agents() });
   const investigations = useQuery({ queryKey: ["investigations"], queryFn: api.investigations, retry: false });
   const registeredAgents = agents.data?.agents ?? [];
-  const hasCodex = registeredAgents.some(({ producerType }) => producerType === "codex_desktop" || producerType === "codex_cli");
   const executions = useQuery({
     queryKey: ["onboarding-executions"],
     queryFn: () => { const end = Date.now(); return api.executions(end - 7 * 86_400_000, end, 50); },
     enabled: registeredAgents.length > 0,
-    retry: false,
-  });
-  const recentCodex = useQuery({
-    queryKey: ["onboarding-recent-codex"],
-    queryFn: () => api.recentCodexConversations(168, 1),
-    enabled: hasCodex,
     retry: false,
   });
   const router = useRouter();
@@ -106,12 +101,11 @@ export function OnboardingPage() {
   if (connectors.error || agents.error) return <div className="page"><ErrorState error={connectors.error ?? agents.error} onRetry={() => { void connectors.refetch(); void agents.refetch(); }} /></div>;
   const list = connectors.data?.connectors ?? [];
   const registeredServices = new Set(registeredAgents.map(({ serviceName }) => serviceName));
-  const executionObserved = (executions.data?.executions.some(({ serviceName }) => registeredServices.has(serviceName)) ?? false)
-    || (hasCodex && (recentCodex.data?.conversations.length ?? 0) > 0);
+  const executionObserved = executions.data?.executions.some(({ serviceName }) => registeredServices.has(serviceName)) ?? false;
   const steps = [
     { title: "Connect observability", description: "Give Tracey access to traces, logs, and metrics in SigNoz.", done: list.some(({ id, state }) => id === "signoz" && state === "ready"), path: "/connectors?connector=signoz" },
     { title: "Connect infrastructure", description: "Validate Kubernetes investigation and approved execution permissions.", done: list.some(({ id, state }) => id === "kubernetes" && state === "ready"), path: "/connectors?connector=kubernetes" },
-    { title: "Connect an agent", description: "Configure Codex, Claude Code, or a custom OpenTelemetry agent and register its observed identity.", done: registeredAgents.length > 0, path: "/agents?register=true" },
+    { title: "Connect an agent", description: "Configure an enabled producer and register the exact OpenTelemetry service identity.", done: registeredAgents.length > 0, path: "/agents?register=true" },
     { title: "Validate telemetry", description: "Confirm that Tracey can query at least one real execution from a connected agent.", done: executionObserved, path: executionObserved ? "/runs" : "/agents?register=true" },
     { title: "Run the first investigation", description: "Ask Tracey a grounded question about your connected systems.", done: (investigations.data?.investigations.length ?? 0) > 0, path: "/investigations?new=true" },
   ];

@@ -17,20 +17,21 @@ import { api } from "../lib/api";
 import { dateTime, relativeTime } from "../lib/format";
 import { usePersistedDraft } from "../lib/usePersistedDraft";
 
-const starterPrompts = [
-  {
+function starterPrompts(hasKubernetes: boolean, hasAgentProducer: boolean) {
+  return [
+  ...(hasKubernetes ? [{
     label: "Inspect Kubernetes health",
     prompt: "Inspect active Kubernetes pods across connected namespaces and report unhealthy workloads.",
-  },
-  {
+  }] : []),
+  ...(hasAgentProducer ? [{
     label: "Find failed agent runs",
     prompt: "Which production agents have failed runs in the last 24 hours, and what evidence explains them?",
-  },
-  {
-    label: "Review recent Codex activity",
-    prompt: "Search recent Codex activity from the last 24 hours and summarize tool calls, failures, and latency.",
-  },
-];
+  }, {
+    label: "Review recent agent activity",
+    prompt: "Review recent executions from connected agents and summarize tool calls, failures, and latency.",
+  }] : []),
+  ];
+}
 
 function conversationTitle(prompt: string): string {
   const compact = prompt.replace(/\s+/g, " ").trim();
@@ -109,6 +110,7 @@ export function InvestigationsPage() {
   const [draft, setDraft] = useState(tracePrompt);
   useEffect(() => { if (tracePrompt) setDraft(tracePrompt); }, [tracePrompt]);
   const query = useQuery({ queryKey: ["investigations"], queryFn: api.investigations });
+  const connectors = useQuery({ queryKey: ["connectors"], queryFn: api.connectors });
   const create = useMutation({
     mutationFn: ({ title }: { title: string; prompt: string }) => api.createInvestigation(title),
     onSuccess: async (session, variables) => {
@@ -126,6 +128,10 @@ export function InvestigationsPage() {
     startConversation(draft);
   };
   const sessions = query.data?.investigations ?? [];
+  const suggestions = starterPrompts(
+    connectors.data?.connectors.some(({ id, state }) => id === "kubernetes" && state === "ready") ?? false,
+    (connectors.data?.agentOnboardingSources.length ?? 0) > 0,
+  );
 
   return <div className="investigation-home-page">
     <aside className="chat-history">
@@ -159,7 +165,7 @@ export function InvestigationsPage() {
           <footer><PolicyModeControl /><span>Tracey can make mistakes. Verify critical changes before approval.</span><button aria-label="Start investigation" disabled={create.isPending || !draft.trim()}><Send /></button></footer>
         </form>
         {create.error && <p className="composer-error" role="alert">{create.error.message}</p>}
-        <div className="chat-suggestions">{starterPrompts.map((item) => <button key={item.label} onClick={() => startConversation(item.prompt)} disabled={create.isPending}><Sparkles /><span>{item.label}</span></button>)}</div>
+        {suggestions.length > 0 && <div className="chat-suggestions">{suggestions.map((item) => <button key={item.label} onClick={() => startConversation(item.prompt)} disabled={create.isPending}><Sparkles /><span>{item.label}</span></button>)}</div>}
       </div>
     </section>
   </div>;
@@ -179,6 +185,11 @@ export function InvestigationDetailPage() {
   const sessions = useQuery({ queryKey: ["investigations"], queryFn: api.investigations });
   const messages = useQuery({ queryKey: ["messages", sessionId], queryFn: () => api.messages(sessionId), refetchInterval: 15_000 });
   const actions = useQuery({ queryKey: ["actions"], queryFn: () => api.actions(), refetchInterval: 5_000 });
+  const connectors = useQuery({ queryKey: ["connectors"], queryFn: api.connectors });
+  const suggestions = starterPrompts(
+    connectors.data?.connectors.some(({ id, state }) => id === "kubernetes" && state === "ready") ?? false,
+    (connectors.data?.agentOnboardingSources.length ?? 0) > 0,
+  );
   const send = useMutation({
     mutationFn: (content: string) => api.chat(sessionId, content),
     onSuccess: async () => {
@@ -277,7 +288,7 @@ export function InvestigationDetailPage() {
             <div className="tracey-orb" aria-hidden="true"><Image src="/crumbles-logo.png" alt="" width={48} height={49} /></div>
             <h2>Start the investigation</h2>
             <p>Give Tracey an agent, service, trace, namespace, or symptom. It will gather evidence before making technical claims.</p>
-            <div className="chat-suggestions">{starterPrompts.slice(0, 2).map((item) => <button key={item.label} onClick={() => send.mutate(item.prompt)}><Sparkles /><span>{item.label}</span></button>)}</div>
+            {suggestions.length > 0 && <div className="chat-suggestions">{suggestions.slice(0, 2).map((item) => <button key={item.label} onClick={() => send.mutate(item.prompt)}><Sparkles /><span>{item.label}</span></button>)}</div>}
           </div> : messages.data.messages.map((message) => <article key={message.messageId} className={`chat-turn chat-turn-${message.role}`}>
             <div className="chat-turn-avatar">{message.role === "assistant" ? <Bot /> : <UserRound />}</div>
             <div className="chat-turn-content">

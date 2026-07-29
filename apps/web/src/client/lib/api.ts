@@ -1,5 +1,5 @@
 import type {
-  ActionEvent, ActionProposal, Agent, AgentDeployment, Connector, Health, InvestigationMessage,
+  ActionEvent, ActionProposal, Agent, AgentConnectionRequest, AgentDeployment, Connector, ConnectorCatalog, Health, InvestigationMessage,
   InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
   Incident, IncidentEvent, IncidentStatus, ExecutionFeed, KubernetesDeploymentSummary,
   CodexExecutionGraph, RecentCodexConversations,
@@ -30,13 +30,13 @@ const query = (values: Record<string, string | number | boolean | undefined>) =>
 
 export const api = {
   health: () => request<Health>("/health"),
-  connectors: () => request<{ connectors: Connector[]; boundary: string; secretStorageAvailable: boolean }>("/v1/connectors"),
+  connectors: () => request<ConnectorCatalog>("/v1/connectors"),
   testConnector: (connectorId: Connector["id"], configuration: Record<string, unknown>) => request<{ ok: true; effectiveIdentity: string; checkedAt: string }>(`/v1/connectors/${connectorId}/test`, { method: "POST", body: JSON.stringify(configuration) }),
   configureConnector: (connectorId: Connector["id"], configuration: Record<string, unknown>) => request<Record<string, unknown>>(`/v1/connectors/${connectorId}/configuration`, { method: "PUT", body: JSON.stringify(configuration) }),
   setConnectorEnabled: (connectorId: Connector["id"], enabled: boolean) => request<Record<string, unknown>>(`/v1/connectors/${connectorId}/state`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
   deleteConnector: (connectorId: Connector["id"]) => request<void>(`/v1/connectors/${connectorId}/configuration`, { method: "DELETE" }),
   agents: (limit = 100) => request<{ agents: Agent[] }>(`/v1/agents?${query({ limit })}`),
-  createAgent: (input: Omit<Agent, "agentId" | "status" | "createdAt" | "updatedAt">) => request<Agent>("/v1/agents", { method: "POST", body: JSON.stringify(input) }),
+  createAgent: (input: AgentConnectionRequest) => request<Agent>("/v1/agents", { method: "POST", body: JSON.stringify(input) }),
   kubernetesNamespaces: () => request<{ namespaces: string[] }>("/v1/kubernetes/namespaces"),
   kubernetesDeployments: (namespace: string) => request<{ deployments: KubernetesDeploymentSummary[] }>(`/v1/kubernetes/deployments?${query({ namespace })}`),
   agentDeployment: (agentId: string) => request<AgentDeployment>(`/v1/agents/${agentId}/deployment`),
