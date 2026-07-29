@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { agentRunsToExecutions, codexLogsToExecutions } from "./execution-feed.js";
+import {
+  agentRunsToExecutions,
+  codexLogsToExecutions,
+  pageExecutions,
+} from "./execution-feed.js";
 
 describe("unified execution feed", () => {
   it("groups privacy-safe Codex events by trace and aggregates operational metadata", () => {
@@ -67,5 +71,32 @@ describe("unified execution feed", () => {
     assert.deepEqual(executions[0]?.tools, ["list_tickets"]);
     assert.equal(executions[0]?.inputTokens, 18);
     assert.equal(executions[0]?.costUsd, 0.0000093);
+  });
+
+  it("paginates executions with deterministic ordering when timestamps tie", () => {
+    const runs = ["c", "a", "b"].map((suffix) => ({
+      traceId: suffix.repeat(32),
+      runId: `run-${suffix}`,
+      serviceName: "support-agent-api",
+      outcome: "success",
+      startedAt: "2026-07-25T00:00:00.000Z",
+      durationMs: 1,
+    }));
+    const executions = agentRunsToExecutions({
+      sourceId: "agent:support",
+      producerType: "custom_otel",
+      producerName: "Support agent",
+      serviceName: "support-agent-api",
+      environment: "production",
+      runs,
+    });
+
+    const first = pageExecutions(executions, { offset: 0, limit: 2 });
+    const second = pageExecutions(executions, { offset: 2, limit: 2 });
+    assert.deepEqual(first.executions.map(({ runId }) => runId), ["run-a", "run-b"]);
+    assert.deepEqual(second.executions.map(({ runId }) => runId), ["run-c"]);
+    assert.equal(first.total, 3);
+    assert.equal(first.hasNextPage, true);
+    assert.equal(second.hasNextPage, false);
   });
 });

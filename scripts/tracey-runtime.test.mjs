@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executorConfigured, localDatabase, localPostgresEnvironment, parsePort } from "./tracey-runtime.mjs";
+import {
+  executorConfigured,
+  localDatabase,
+  localApplicationDatabaseUrl,
+  localPostgresEnvironment,
+  parsePort,
+  runtimeId,
+} from "./tracey-runtime.mjs";
 
 test("runtime port parsing is bounded and deterministic", () => {
   assert.equal(parsePort(undefined, 3000), 3000);
@@ -18,9 +25,30 @@ test("runtime starts PostgreSQL only for local database URLs", () => {
 test("local PostgreSQL initialization matches DATABASE_URL credentials", () => {
   assert.deepEqual(
     localPostgresEnvironment("postgresql://tracey_app:secret%20value@127.0.0.1:5432/tracey"),
-    { TRACEY_POSTGRES_USER: "tracey_app", TRACEY_POSTGRES_DB: "tracey", POSTGRES_PASSWORD: "secret value" },
+    {
+      TRACEY_POSTGRES_USER: "tracey_app",
+      TRACEY_POSTGRES_DB: "tracey",
+      TRACEY_POSTGRES_PORT: "5432",
+      POSTGRES_PASSWORD: "secret value",
+    },
   );
   assert.throws(() => localPostgresEnvironment("postgresql://tracey_app@127.0.0.1:5432/tracey"), /must include/);
+});
+
+test("runtime IDs create isolated, bounded Compose project names", () => {
+  assert.equal(runtimeId("Clean Install 42"), "clean-install-42");
+  assert.throws(() => runtimeId(""));
+  assert.throws(() => runtimeId("x".repeat(49)));
+});
+
+test("local services use a non-superuser application role", () => {
+  const parsed = new URL(localApplicationDatabaseUrl(
+    "postgresql://tracey_admin:admin-secret@127.0.0.1:5432/tracey",
+    "app-secret",
+  ));
+  assert.equal(parsed.username, "tracey_admin_app");
+  assert.equal(parsed.password, "app-secret");
+  assert.equal(parsed.pathname, "/tracey");
 });
 
 test("executor requires explicit enablement, authentication and scopes", () => {

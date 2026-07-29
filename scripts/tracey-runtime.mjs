@@ -6,19 +6,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import dotenv from "dotenv";
+import pg from "pg";
 
 const repoDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeDir = join(repoDir, ".tracey");
 const logDir = join(runtimeDir, "logs");
 const statePath = join(runtimeDir, "runtime.json");
 const envPath = join(repoDir, ".env");
-const postgresCompose = ["compose", "--env-file", ".env", "-p", "tracey-postgres", "-f", "infra/postgres/compose.yaml"];
-const collectorCompose = ["compose", "--env-file", ".env", "-p", "tracey-otel", "-f", "infra/otel/compose.yaml"];
 const serviceSpecs = {
   api: { packageName: "@tracey/api", portKey: "PORT", defaultPort: 3000, healthPath: "/health" },
   worker: { packageName: "@tracey/worker", portKey: "WORKER_HEALTH_PORT", defaultPort: 3001, healthPath: "/" },
   executor: { packageName: "@tracey/executor", portKey: "EXECUTOR_PORT", defaultPort: 3002, healthPath: "/health" },
-  web: { packageName: "@tracey/web", defaultPort: 8501, healthPath: "/healthz" },
+  web: { packageName: "@tracey/web", portKey: "TRACEY_WEB_PORT", defaultPort: 8501, healthPath: "/healthz" },
 };
 
 export function parsePort(value, fallback) {
@@ -41,7 +40,32 @@ export function localPostgresEnvironment(databaseUrl) {
   if (!user || !password || !database) {
     throw new Error("A local DATABASE_URL must include its PostgreSQL user, password, and database name.");
   }
-  return { TRACEY_POSTGRES_USER: user, TRACEY_POSTGRES_DB: database, POSTGRES_PASSWORD: password };
+  return {
+    TRACEY_POSTGRES_USER: user,
+    TRACEY_POSTGRES_DB: database,
+    TRACEY_POSTGRES_PORT: parsed.port || "5432",
+    POSTGRES_PASSWORD: password,
+  };
+}
+
+export function runtimeId(value = "tracey") {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!normalized || normalized.length > 48) {
+    throw new Error("TRACEY_RUNTIME_ID must contain 1-48 letters, numbers, dashes, or underscores");
+  }
+  return normalized;
+}
+
+function composeArgs(environment, component, file) {
+  return [
+    "compose",
+    "--env-file",
+    ".env",
+    "-p",
+    `${runtimeId(environment.TRACEY_RUNTIME_ID)}-${component}`,
+    "-f",
+    file,
+  ];
 }
 
 export function executorConfigured(environment) {
@@ -148,7 +172,54 @@ function compose(environment, args, inherit = false) {
   return run("docker", args, { env: environment, inherit });
 }
 
-async function waitForPostgres(environment) {
+export function localApplicationDatabaseUrl(databaseUrl, configuredPassword) {
+  const parsed = new URL(databaseUrl);
+  const adminUser = decodeURIComponent(parsed.username);
+  const appUser = `${adminUser.slice(0, 50)}_app`;
+  parsed.username = appUser;
+  parsed.password = configuredPassword || decodeURIComponent(parsed.password);
+  return parsed.toString();
+}
+
+async function provisionLocalApplicationRole(environment) {
+  const appDatabaseUrl = localApplicationDatabaseUrl(
+    environment.DATABASE_URL,
+    environment.TRACEY_POSTGRES_APP_PASSWORD,
+  );
+  const parsed = new URL(appDatabaseUrl);
+  const appUser = decodeURIComponent(parsed.username);
+  const appPassword = decodeURIComponent(parsed.password);
+  const databaseName = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  const client = new pg.Client({ connectionString: environment.DATABASE_URL });
+  await client.connect();
+  try {
+    const role = await client.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [appUser]);
+    const statement = await client.query(
+      role.rowCount
+        ? "SELECT format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1::text, $2::text) AS sql"
+        : "SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1::text, $2::text) AS sql",
+      [appUser, appPassword],
+    );
+    await client.query(statement.rows[0].sql);
+    const grants = await client.query(
+      `SELECT ARRAY[
+         format('GRANT CONNECT ON DATABASE %I TO %I', $1::text, $2::text),
+         format('GRANT USAGE ON SCHEMA tracey TO %I', $2::text),
+         format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA tracey TO %I', $2::text),
+         format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA tracey TO %I', $2::text),
+         format('ALTER DEFAULT PRIVILEGES IN SCHEMA tracey GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', $2::text),
+         format('ALTER DEFAULT PRIVILEGES IN SCHEMA tracey GRANT USAGE, SELECT ON SEQUENCES TO %I', $2::text)
+       ] AS statements`,
+      [databaseName, appUser],
+    );
+    for (const grant of grants.rows[0].statements) await client.query(grant);
+  } finally {
+    await client.end();
+  }
+  return appDatabaseUrl;
+}
+
+async function waitForPostgres(environment, postgresCompose) {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const result = spawnSync("docker", [...postgresCompose, "exec", "-T", "postgres", "pg_isready", "-U", environment.TRACEY_POSTGRES_USER, "-d", environment.TRACEY_POSTGRES_DB], {
@@ -265,6 +336,9 @@ async function down({ quiet = false } = {}) {
     if (!quiet) console.log(`${result.stopped ? "Stopped" : "Skipped"} ${service.name}${result.reason ? `: ${result.reason}` : ""}`);
   }
   const environment = loadEnvironment();
+  if (environment.DATABASE_URL && localDatabase(environment.DATABASE_URL)) {
+    Object.assign(environment, localPostgresEnvironment(environment.DATABASE_URL));
+  }
   for (const dependency of [...(state.dependencies ?? [])].reverse()) {
     try {
       compose(environment, [...dependency.composeArgs, "down", "--remove-orphans"]);
@@ -304,7 +378,9 @@ async function up() {
   const apiPort = parsePort(environment.PORT, 3000);
   const workerPort = parsePort(environment.WORKER_HEALTH_PORT, 3001);
   const executorPort = parsePort(environment.EXECUTOR_PORT, 3002);
-  const webPort = 8501;
+  const webPort = parsePort(environment.TRACEY_WEB_PORT, 8501);
+  const postgresCompose = composeArgs(environment, "postgres", "infra/postgres/compose.yaml");
+  const collectorCompose = composeArgs(environment, "otel", "infra/otel/compose.yaml");
   const requiredPorts = [
     ...(localPostgres ? [{ name: "PostgreSQL", port: Number(new URL(databaseUrl).port || 5432) }] : []),
     ...(collectorConfigured ? [{ name: "OTLP gRPC", port: 4317 }, { name: "OTLP HTTP", port: 4318 }, { name: "Collector health", port: 13133 }] : []),
@@ -323,7 +399,7 @@ async function up() {
       compose(environment, [...postgresCompose, "up", "-d"]);
       state.dependencies.push({ name: "postgres", service: "postgres", port: Number(new URL(databaseUrl).port || 5432), composeArgs: postgresCompose });
       writeState(state);
-      await waitForPostgres(environment);
+      await waitForPostgres(environment, postgresCompose);
     }
     if (collectorConfigured) {
       console.log("Starting OpenTelemetry Collector...");
@@ -337,11 +413,17 @@ async function up() {
 
     console.log("Applying checksum-verified database migrations...");
     run("bash", ["scripts/migrate.sh"], { env: environment, inherit: true });
+    let applicationDatabaseUrl = databaseUrl;
+    if (localPostgres) {
+      console.log("Provisioning a non-superuser local application role...");
+      applicationDatabaseUrl = await provisionLocalApplicationRole(environment);
+    }
     console.log("Building Tracey...");
     run("pnpm", ["build"], { env: environment, inherit: true });
 
     const shared = {
       ...environment,
+      DATABASE_URL: applicationDatabaseUrl,
       TRACEY_API_URL: `http://127.0.0.1:${apiPort}`,
       TRACEY_UI_ACCESS_TOKEN: environment.TRACEY_UI_ACCESS_TOKEN || environment.TRACEY_API_BEARER_TOKEN,
       ...(startExecutor ? { TRACEY_EXECUTOR_URL: `http://127.0.0.1:${executorPort}` } : {}),

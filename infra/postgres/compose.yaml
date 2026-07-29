@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${TRACEY_POSTGRES_USER:-tracey}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${TRACEY_POSTGRES_PORT:-5432}:5432"
     volumes:
       - tracey-postgres:/var/lib/postgresql/data
     healthcheck:

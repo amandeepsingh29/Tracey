@@ -17,7 +17,11 @@ SQL
 baseline="${1:-}"
 for migration in infra/postgres/migrations/*.sql; do
   filename="$(basename "${migration}")"
-  checksum="$(shasum -a 256 "${migration}" | awk '{print $1}')"
+  if command -v shasum >/dev/null 2>&1; then
+    checksum="$(shasum -a 256 "${migration}" | awk '{print $1}')"
+  else
+    checksum="$(sha256sum "${migration}" | awk '{print $1}')"
+  fi
   [[ "${filename}" =~ ^[0-9A-Za-z_.-]+$ && "${checksum}" =~ ^[0-9a-f]{64}$ ]] || { echo "Unsafe migration metadata" >&2; exit 1; }
   applied_checksum="$(psql "${DATABASE_URL}" --tuples-only --no-align --set ON_ERROR_STOP=1 \
     --command "SELECT checksum FROM tracey.schema_migrations WHERE filename='${filename}'")"

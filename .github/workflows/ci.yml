@@ -34,6 +34,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
       - name: Build
         run: pnpm build
 
@@ -45,3 +48,12 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Verify runtime isolation
+        run: pnpm test:runtime
+
+      - name: Load-test Runs pagination
+        run: pnpm verify:runs-load
+
+      - name: Verify production manifests
+        run: pnpm verify:production

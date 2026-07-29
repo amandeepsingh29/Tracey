@@ -1,0 +1,10 @@
+FROM postgres:17-bookworm
+
+WORKDIR /tracey
+COPY scripts/migrate.sh ./scripts/migrate.sh
+COPY infra/postgres/migrations ./infra/postgres/migrations
+
+RUN chmod 0555 ./scripts/migrate.sh
+
+USER postgres
+ENTRYPOINT ["./scripts/migrate.sh"]

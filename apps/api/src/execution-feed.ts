@@ -42,6 +42,35 @@ export type ObservedExecution = {
   eventCount: number;
 };
 
+export type ExecutionPage = {
+  executions: ObservedExecution[];
+  offset: number;
+  limit: number;
+  total: number;
+  hasNextPage: boolean;
+};
+
+export function compareExecutionsNewestFirst(left: ObservedExecution, right: ObservedExecution): number {
+  const timestampOrder = Date.parse(right.startedAt) - Date.parse(left.startedAt);
+  return timestampOrder || left.executionId.localeCompare(right.executionId);
+}
+
+export function pageExecutions(
+  executions: ObservedExecution[],
+  input: { offset: number; limit: number },
+): ExecutionPage {
+  const offset = Math.max(0, Math.trunc(input.offset));
+  const limit = Math.max(1, Math.trunc(input.limit));
+  const ordered = [...executions].sort(compareExecutionsNewestFirst);
+  return {
+    executions: ordered.slice(offset, offset + limit),
+    offset,
+    limit,
+    total: ordered.length,
+    hasNextPage: offset + limit < ordered.length,
+  };
+}
+
 function stringAttribute(attributes: Record<string, unknown>, key: string): string | undefined {
   const value = attributes[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;

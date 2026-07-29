@@ -49,6 +49,10 @@ Install Tracey
 - [x] Local lifecycle commands: `pnpm tracey:up`, `pnpm tracey:status`, and
       `pnpm tracey:down`.
 - [x] Read-only Tracey MCP investigation tools.
+- [x] API-side OIDC JWT verification with remote JWKS, fixed tenant claims, and
+      viewer/analyst/operator/administrator role enforcement.
+- [x] Forced PostgreSQL row-level security for every tenant-owned table.
+- [x] Checksum-verified PostgreSQL backup and restore tooling.
 
 ## P0 — Private alpha completion
 
@@ -56,12 +60,12 @@ These items block calling Tracey a production alpha.
 
 ### 1. Prove a clean installation
 
-- [ ] Create an automated clean-machine installation test.
+- [x] Create an automated clean-machine installation test.
 - [ ] Start every required service from only documented configuration.
-- [ ] Apply every PostgreSQL migration to an empty database.
+- [x] Apply every PostgreSQL migration to an empty database.
 - [ ] Verify startup failure messages for missing SigNoz, PostgreSQL, executor,
       and model-provider configuration.
-- [ ] Prove `tracey:down` stops only Tracey-owned processes and containers.
+- [x] Prove `tracey:down` stops only Tracey-owned processes and containers.
 - [ ] Publish a versioned local installation artifact or container set.
 
 Acceptance criteria:
@@ -103,7 +107,7 @@ Acceptance criteria:
 - [x] Clearly distinguish absent producer data from query failures.
 - [x] Add live refresh or bounded polling to the Runs feed.
 - [x] Add bounded pagination with deterministic execution ordering.
-- [ ] Load-test pagination and ordering with production-scale execution volume.
+- [x] Load-test pagination and ordering with production-scale execution volume.
 - [x] Add saved filters and shareable execution URLs.
 - [x] Ensure every execution row routes to the correct source-specific detail
       resolver without source-specific list-page behavior.
@@ -162,7 +166,7 @@ Acceptance criteria:
 - [ ] Replace the shared UI service identity with per-user sessions.
 - [ ] Enforce viewer, analyst, operator, and administrator permissions end to
       end.
-- [ ] Prove tenant isolation across PostgreSQL, SigNoz credentials, connector
+- [x] Prove tenant isolation across PostgreSQL, SigNoz credentials, connector
       configuration, investigations, and actions.
 - [ ] Add session expiry, revocation, and security-event auditing.
 - [ ] Add an external secret manager for production connector credentials.
@@ -170,9 +174,9 @@ Acceptance criteria:
 ### Deployment and operations
 
 - [ ] Publish signed API, web, worker, executor, and migration images.
-- [ ] Replace registry placeholders in staging and production overlays.
+- [x] Replace registry placeholders in staging and production overlays.
 - [ ] Add ingress, TLS, DNS, and network-policy verification.
-- [ ] Document managed PostgreSQL backup, restore, retention, and disaster
+- [x] Document managed PostgreSQL backup, restore, retention, and disaster
       recovery.
 - [ ] Add zero-downtime migration and rollback procedures.
 - [ ] Define capacity targets and run API, worker, database, and Runs-feed load
@@ -240,7 +244,7 @@ policy checks, verification, recovery, and tests are complete.
 Tracey reaches private production alpha only when all of the following are
 checked:
 
-- [ ] A clean installation completes without repository-specific local state.
+- [x] A clean installation completes without repository-specific local state.
 - [ ] A new custom OpenTelemetry agent is connected entirely through the UI.
 - [ ] Its real execution appears in Runs with an understandable graph.
 - [ ] Tracey diagnoses a controlled failure with citable evidence.
@@ -258,6 +262,10 @@ Update this table only when verification evidence exists.
 
 | Date | Change | Verification |
 | --- | --- | --- |
+| 2026-07-29 | Added a clean-install harness, isolated runtime identities, and a non-superuser local application database role | Fresh 270-file copy installed 658 packages, applied all 14 migrations to an empty database, passed authenticated health checks, and removed its isolated runtime |
+| 2026-07-29 | Enforced tenant isolation and added OIDC role verification | Live two-tenant PostgreSQL and SigNoz-scope checks plus 63/63 API tests, including remote-JWKS issuer, audience, expiry, tenant, and role cases |
+| 2026-07-29 | Added PostgreSQL backup/restore and production manifest/release gates | Live backup into a separate database restored 14 migrations and the verification row; production render passed 26 resources, 5 hardened Deployments, and 5 network policies |
+| 2026-07-29 | Load-tested deterministic Runs pagination | 10,000 executions and 40,000 spans traversed across 100 pages with 2.05 ms per-page p95 and all ordering assertions passing |
 | 2026-07-29 | Added generated Python, Node.js, and generic OTLP onboarding plus a versioned nine-field execution contract and production Runs controls | Live no-restart verification observed all three producers at 100% contract coverage; typecheck, API, adapter, instrumentation, web tests, production build, and browser inspection |
 | 2026-07-29 | Agent onboarding now comes from enabled connector capabilities, defaults to generic OpenTelemetry, and keeps registration separate from observed telemetry | Connector, API, and web tests plus live API and browser verification |
 | 2026-07-29 | Runs sources and filters now follow active registered agents; Codex has no dedicated list-page behavior | API tests, web tests, production builds, and live browser inspection |

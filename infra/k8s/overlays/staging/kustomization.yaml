@@ -8,14 +8,14 @@ labels:
       tracey.ai/deployment-profile: staging
 images:
   - name: tracey-api
-    newName: registry.example.com/tracey/api
+    newName: ghcr.io/amandeepsingh29/tracey-api
     newTag: 0.1.0-rc.1
   - name: tracey-executor
-    newName: registry.example.com/tracey/executor
+    newName: ghcr.io/amandeepsingh29/tracey-executor
     newTag: 0.1.0-rc.1
   - name: tracey-worker
-    newName: registry.example.com/tracey/worker
+    newName: ghcr.io/amandeepsingh29/tracey-worker
     newTag: 0.1.0-rc.1
   - name: tracey-ui
-    newName: registry.example.com/tracey/ui
+    newName: ghcr.io/amandeepsingh29/tracey-ui
     newTag: 0.1.0-rc.1
