@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  AgentDeploymentMappingSchema,
   AgentRegistrationSchema,
+  type AgentDeploymentMapping,
+  type AgentDeploymentMappingRequest,
   type AgentRegistration,
   type AgentRegistrationRequest,
 } from "@tracey/domain";
@@ -17,6 +20,18 @@ const AgentRowSchema = z.object({
   normalization_profile: z.string(),
   telemetry_contract_version: z.string(),
   status: z.string(),
+  created_at: z.coerce.date(),
+  updated_at: z.coerce.date(),
+});
+
+const AgentDeploymentMappingRowSchema = z.object({
+  agent_id: z.string().uuid(),
+  connector_id: z.literal("kubernetes"),
+  namespace: z.string(),
+  workload_kind: z.literal("Deployment"),
+  workload_name: z.string(),
+  container_name: z.string().nullable(),
+  validated_at: z.coerce.date(),
   created_at: z.coerce.date(),
   updated_at: z.coerce.date(),
 });
@@ -234,6 +249,21 @@ function normalizeAgent(row: QueryResultRow): AgentRegistration {
   });
 }
 
+function normalizeAgentDeploymentMapping(row: QueryResultRow): AgentDeploymentMapping {
+  const parsed = AgentDeploymentMappingRowSchema.parse(row);
+  return AgentDeploymentMappingSchema.parse({
+    agentId: parsed.agent_id,
+    connectorId: parsed.connector_id,
+    namespace: parsed.namespace,
+    workloadKind: parsed.workload_kind,
+    workloadName: parsed.workload_name,
+    ...(parsed.container_name ? { containerName: parsed.container_name } : {}),
+    validatedAt: parsed.validated_at.toISOString(),
+    createdAt: parsed.created_at.toISOString(),
+    updatedAt: parsed.updated_at.toISOString(),
+  });
+}
+
 function normalizeActionProposal(row: QueryResultRow): ActionProposal {
   return {
     proposalId:String(row.proposal_id), sessionId:String(row.session_id), actionType:row.action_type as ActionProposal["actionType"],
@@ -418,6 +448,82 @@ export class PostgresStore {
       );
       const row = result.rows[0];
       return row ? normalizeAgent(row) : undefined;
+    });
+  }
+
+  async saveAgentDeploymentMapping(
+    tenantId: string,
+    agentId: string,
+    input: AgentDeploymentMappingRequest,
+  ): Promise<AgentDeploymentMapping> {
+    const parsedAgentId = z.string().uuid().parse(agentId);
+    const mapping = AgentDeploymentMappingSchema.omit({
+      agentId: true,
+      validatedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    }).parse(input);
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO tracey.agent_deployment_mappings (
+           tenant_id, agent_id, connector_id, namespace, workload_kind,
+           workload_name, container_name, validated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+         ON CONFLICT (tenant_id, agent_id) DO UPDATE SET
+           connector_id = EXCLUDED.connector_id,
+           namespace = EXCLUDED.namespace,
+           workload_kind = EXCLUDED.workload_kind,
+           workload_name = EXCLUDED.workload_name,
+           container_name = EXCLUDED.container_name,
+           validated_at = now(),
+           updated_at = now()
+         RETURNING agent_id, connector_id, namespace, workload_kind, workload_name,
+                   container_name, validated_at, created_at, updated_at`,
+        [
+          tenantId,
+          parsedAgentId,
+          mapping.connectorId,
+          mapping.namespace,
+          mapping.workloadKind,
+          mapping.workloadName,
+          mapping.containerName ?? null,
+        ],
+      );
+      const row = result.rows[0];
+      if (!row) throw new PostgresStoreError("Agent deployment mapping returned no row");
+      return normalizeAgentDeploymentMapping(row);
+    });
+  }
+
+  async getAgentDeploymentMapping(
+    tenantId: string,
+    agentId: string,
+  ): Promise<AgentDeploymentMapping | undefined> {
+    const parsedAgentId = z.string().uuid().parse(agentId);
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT agent_id, connector_id, namespace, workload_kind, workload_name,
+                container_name, validated_at, created_at, updated_at
+           FROM tracey.agent_deployment_mappings
+          WHERE tenant_id = $1 AND agent_id = $2
+          LIMIT 1`,
+        [tenantId, parsedAgentId],
+      );
+      const row = result.rows[0];
+      return row ? normalizeAgentDeploymentMapping(row) : undefined;
+    });
+  }
+
+  async deleteAgentDeploymentMapping(tenantId: string, agentId: string): Promise<boolean> {
+    const parsedAgentId = z.string().uuid().parse(agentId);
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `DELETE FROM tracey.agent_deployment_mappings
+          WHERE tenant_id = $1 AND agent_id = $2
+          RETURNING agent_id`,
+        [tenantId, parsedAgentId],
+      );
+      return Boolean(result.rows[0]);
     });
   }
 

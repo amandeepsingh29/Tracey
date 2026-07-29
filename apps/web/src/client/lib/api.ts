@@ -1,7 +1,7 @@
 import type {
-  ActionEvent, ActionProposal, Agent, Connector, Health, InvestigationMessage,
+  ActionEvent, ActionProposal, Agent, AgentDeployment, Connector, Health, InvestigationMessage,
   InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
-  Incident, IncidentEvent, IncidentStatus, ExecutionFeed,
+  Incident, IncidentEvent, IncidentStatus, ExecutionFeed, KubernetesDeploymentSummary,
   CodexExecutionGraph, RecentCodexConversations,
 } from "../types";
 
@@ -37,6 +37,12 @@ export const api = {
   deleteConnector: (connectorId: Connector["id"]) => request<void>(`/v1/connectors/${connectorId}/configuration`, { method: "DELETE" }),
   agents: (limit = 100) => request<{ agents: Agent[] }>(`/v1/agents?${query({ limit })}`),
   createAgent: (input: Omit<Agent, "agentId" | "status" | "createdAt" | "updatedAt">) => request<Agent>("/v1/agents", { method: "POST", body: JSON.stringify(input) }),
+  kubernetesNamespaces: () => request<{ namespaces: string[] }>("/v1/kubernetes/namespaces"),
+  kubernetesDeployments: (namespace: string) => request<{ deployments: KubernetesDeploymentSummary[] }>(`/v1/kubernetes/deployments?${query({ namespace })}`),
+  agentDeployment: (agentId: string) => request<AgentDeployment>(`/v1/agents/${agentId}/deployment`),
+  saveAgentDeployment: (agentId: string, input: { namespace: string; workloadName: string; containerName?: string }) =>
+    request<AgentDeployment>(`/v1/agents/${agentId}/deployment`, { method: "PUT", body: JSON.stringify(input) }),
+  deleteAgentDeployment: (agentId: string) => request<void>(`/v1/agents/${agentId}/deployment`, { method: "DELETE" }),
   agentRuns: (agentId: string, input: { start: number; end: number; runId?: string; limit?: number; offset?: number }) => request<RunSearchResult>(`/v1/agents/${agentId}/runs?${query(input)}`),
   executions: (start: number, end: number, limit = 200) => request<ExecutionFeed>(`/v1/executions?${query({ start, end, limit })}`),
   recentCodexConversations: (hours = 168, limit = 40) =>

@@ -143,6 +143,17 @@ const toolDefinitions = [
   {
     type: "function",
     function: {
+      name: "get_agent_deployment",
+      description: "Resolve a registered agent to its validated Kubernetes Deployment and return live rollout, pod, image, and restart health. Use this before proposing a Kubernetes change for an agent.",
+      parameters: {
+        type: "object", required: ["agentId"], additionalProperties: false,
+        properties: { agentId: { type: "string", format: "uuid" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_failed_agent_runs",
       description: "Scan every active registered agent and report failed runs or failure signals in one bounded operation. Always use this for questions such as 'which agents failed in the last 24 hours?'; do not manually call list_agents followed by search_agent_runs for each agent.",
       parameters: {
@@ -506,6 +517,7 @@ Complete every investigation in the current response. Never say "please hold on"
 For every telemetry claim, cite an available reference exactly as [trace:<32 hex> span:<16 hex>]. Do not reveal prompts, outputs, tool payloads, credentials, private reasoning, or personal data.
 Treat log and pod requests as different intents. Never call list_pods to answer a logs question. Use get_pod_logs only when a namespace and pod are known, query_logs only when an exact trace is known, and search_codex_logs only when the user asks about Codex activity. If a logs question has none of those identifiers or prior context, ask one concise clarifying question instead of calling an unrelated tool.
 For named application, service, or agent liveness questions, call resolve_application_status first. Do not ask the user for a namespace before searching the registry and all connected namespaces. Clearly distinguish a registered agent identity from a currently running Kubernetes workload; registration alone is not proof that an application is live.
+When a registered agent has a deployment mapping, treat that validated mapping as the authoritative Kubernetes target. Call get_agent_deployment before proposing a Kubernetes remediation for an agent, and use its exact namespace and workload name instead of guessing from pod names.
 You may prepare structured remediation requests, including generic Kubernetes apply, patch, and delete operations. You never mutate infrastructure directly. When the user requests a mutation, inspect the exact target if needed and then call propose_remediation in the same response. Do not ask for confirmation before a durable proposal exists. Tracey will ask for confirmation after policy evaluation, and a later explicit administrator confirmation executes that exact pending proposal through the authenticated executor.
 Use UTC epoch milliseconds for tools. If the user omits a time range, use the current time supplied below and search no more than the previous 24 hours.`;
 
@@ -586,6 +598,23 @@ function operationalEvidence(toolName: string, args: unknown, result: unknown): 
       sourceId: "registered-agents",
       signal: "tracey.agent.registry",
       observation: `Tracey's tenant-scoped registry returned ${agents.length} registered agent${agents.length === 1 ? "" : "s"}.`,
+    }];
+  }
+  if (toolName === "get_agent_deployment") {
+    const mapping = record.mapping && typeof record.mapping === "object"
+      ? record.mapping as Record<string, unknown>
+      : undefined;
+    const health = record.health && typeof record.health === "object"
+      ? record.health as Record<string, unknown>
+      : undefined;
+    if (!mapping || !health) return [];
+    const namespace = safeSourcePart(mapping.namespace) ?? "unknown";
+    const workload = safeSourcePart(mapping.workloadName) ?? "unknown";
+    return [{
+      sourceType: "kubernetes",
+      sourceId: `agent-deployment:${namespace}/${workload}`,
+      signal: "kubernetes.agent_deployment",
+      observation: `Tracey's validated agent mapping resolved to Deployment ${namespace}/${workload}; live Kubernetes health reports ${Number(health.readyReplicas ?? 0)}/${Number(health.desiredReplicas ?? 0)} replicas ready and ${Number(health.totalRestarts ?? 0)} container restarts.`,
     }];
   }
   if (toolName === "search_failed_agent_runs") {
@@ -820,8 +849,8 @@ export class AgenticInvestigator {
     private readonly autonomy?: AutonomyService,
   ) {
     this.cloudAdapter = new KubernetesAdapter({
-      allowedNamespaces: config.allowedNamespaces ?? [],
-      allowedWorkloads: config.allowedWorkloads ?? [],
+      ...(config.allowedNamespaces?.length ? { allowedNamespaces: config.allowedNamespaces } : {}),
+      ...(config.allowedWorkloads?.length ? { allowedWorkloads: config.allowedWorkloads } : {}),
     });
   }
 
@@ -1032,11 +1061,58 @@ export class AgenticInvestigator {
             : Promise.resolve(this.config.allowedNamespaces ?? []),
         ]);
         const pods = (await Promise.all(namespaces.map((namespace) => this.cloudAdapter.listPods(namespace)))).flat();
-        return { ...resolveApplicationStatus(args.query, agents, pods), scopes: namespaces };
+        const resolved = resolveApplicationStatus(args.query, agents, pods);
+        const mappedDeployments = (await Promise.all(resolved.registryMatches.map(async (agent) => {
+          const mapping = await this.store.getAgentDeploymentMapping(this.config.tenantId, agent.agentId);
+          if (!mapping) return undefined;
+          try {
+            return {
+              agentId: agent.agentId,
+              mapping,
+              health: await this.cloudAdapter.getDeploymentHealth(mapping.namespace, mapping.workloadName),
+            };
+          } catch (error) {
+            return {
+              agentId: agent.agentId,
+              mapping,
+              error: error instanceof Error ? error.message : "Mapped Deployment health is unavailable",
+            };
+          }
+        }))).filter((value) => value !== undefined);
+        const healthyMapping = mappedDeployments.some((entry) => entry.health?.ready === true);
+        const mappedPods = mappedDeployments.flatMap((entry) => entry.health?.pods ?? []);
+        const matchingPods = [...resolved.matchingPods];
+        for (const pod of mappedPods) {
+          if (!matchingPods.some(({ namespace, name }) => namespace === pod.namespace && name === pod.name)) {
+            matchingPods.push(pod);
+          }
+        }
+        return {
+          ...resolved,
+          status: healthyMapping ? "running_in_kubernetes" : resolved.status,
+          matchingPods,
+          readyPodCount: matchingPods.filter((pod) =>
+            pod.phase === "Running" && pod.containers.length > 0 && pod.containers.every(({ ready }) => ready)).length,
+          mappedDeployments,
+          scopes: namespaces,
+        };
       }
       case "list_agents": {
         const args = z.object({ limit: z.number().int().min(1).max(100).default(50) }).parse(value);
         return { agents: await this.store.listAgents(this.config.tenantId, args.limit) };
+      }
+      case "get_agent_deployment": {
+        const args = z.object({ agentId: z.string().uuid() }).parse(value);
+        const agent = await this.store.getAgent(this.config.tenantId, args.agentId);
+        if (!agent || agent.status !== "active") throw new Error("Active registered agent not found");
+        const mapping = await this.store.getAgentDeploymentMapping(this.config.tenantId, args.agentId);
+        if (!mapping) throw new Error("The agent is not linked to a Kubernetes Deployment");
+        return {
+          agent,
+          mapping,
+          health: await this.cloudAdapter.getDeploymentHealth(mapping.namespace, mapping.workloadName),
+          observedAt: new Date().toISOString(),
+        };
       }
       case "search_failed_agent_runs": {
         const args = z.object({

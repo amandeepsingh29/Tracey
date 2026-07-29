@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AgentRegistrationRequestSchema } from "./agent.js";
+import { AgentDeploymentMappingRequestSchema, AgentRegistrationRequestSchema } from "./agent.js";
 
 describe("production agent registration", () => {
   it("accepts bounded producer metadata without tenant or credential fields", () => {
@@ -28,6 +28,24 @@ describe("production agent registration", () => {
       environment: "production",
       normalizationProfile: "unknown@1",
       telemetryContractVersion: "tracey-agent-run@1",
+    }).success, false);
+  });
+
+  it("accepts a validated Kubernetes Deployment target and rejects unsafe names", () => {
+    assert.deepEqual(AgentDeploymentMappingRequestSchema.parse({
+      namespace: "production",
+      workloadName: "support-agent-api",
+      containerName: "agent",
+    }), {
+      connectorId: "kubernetes",
+      namespace: "production",
+      workloadKind: "Deployment",
+      workloadName: "support-agent-api",
+      containerName: "agent",
+    });
+    assert.equal(AgentDeploymentMappingRequestSchema.safeParse({
+      namespace: "production;delete",
+      workloadName: "support-agent-api",
     }).success, false);
   });
 });

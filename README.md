@@ -163,6 +163,14 @@ Tracey loads the tenant-scoped registration from PostgreSQL and selects the fixe
 
 PostgreSQL row-level security and parameterized queries provide a second tenant boundary beneath the API scope. See [docs/postgres-storage.md](docs/postgres-storage.md).
 
+### Link an agent to its Kubernetes Deployment
+
+After registration, open the agent in the UI and choose **Link deployment**. Tracey discovers namespaces and Deployments from the configured Kubernetes connector; users do not type an unverified workload identity. Saving a mapping performs a live Deployment read and optionally validates the selected container.
+
+The agent page then combines the telemetry identity with live desired, ready, updated, available and unavailable replicas, selected container image, matching pods, container readiness, and restart counts. Investigations use the validated mapping as the authoritative target when resolving application health or preparing a remediation. The mapping never bypasses the policy or approval workflow.
+
+The current mapping contract intentionally supports Kubernetes `Deployment` workloads only. StatefulSets, DaemonSets, Jobs, serverless platforms, virtual machines, and cloud-resource relationships remain unavailable until each has equivalent discovery, health, action, and verification semantics.
+
 ## Query production telemetry
 
 Search native `agent.run` roots from an instrumented service:

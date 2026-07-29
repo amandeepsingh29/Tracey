@@ -32,6 +32,24 @@ export interface KubernetesAdapterOptions {
   allowedWorkloads?: string[];
 }
 
+export interface KubernetesDeploymentSummary {
+  name: string;
+  namespace: string;
+  containers: Array<{ name: string; image?: string }>;
+  desiredReplicas: number;
+  readyReplicas: number;
+  availableReplicas: number;
+  updatedReplicas: number;
+}
+
+export interface KubernetesDeploymentHealth extends KubernetesDeploymentSummary {
+  ready: boolean;
+  unavailableReplicas: number;
+  pods: PodStatus[];
+  totalRestarts: number;
+  conditions: Array<{ type?: string; status?: string; reason?: string; message?: string }>;
+}
+
 function buildScope(values: string[] | undefined): Set<string> | undefined {
   if (values === undefined || values.includes("*")) return undefined;
   return new Set(values.map((entry) => KubernetesNameSchema.parse(entry)));
@@ -112,6 +130,80 @@ export class KubernetesAdapter {
         .slice(0, 100);
     } catch (error) {
       throw new Error(`Failed to list namespaces: ${errorMessage(error)}`);
+    }
+  }
+
+  async listDeployments(namespace: string): Promise<KubernetesDeploymentSummary[]> {
+    this.validateTarget(namespace);
+    try {
+      const response = await this.apps.listNamespacedDeployment(namespace);
+      return response.body.items
+        .filter(({ metadata }) => Boolean(metadata?.name)
+          && (!this.allowedWorkloads || this.allowedWorkloads.has(metadata!.name!)))
+        .map((deployment) => ({
+          name: deployment.metadata!.name!,
+          namespace,
+          containers: deployment.spec?.template.spec?.containers.map(({ name, image }) => ({
+            name,
+            ...(image ? { image } : {}),
+          })) ?? [],
+          desiredReplicas: deployment.spec?.replicas ?? 0,
+          readyReplicas: deployment.status?.readyReplicas ?? 0,
+          availableReplicas: deployment.status?.availableReplicas ?? 0,
+          updatedReplicas: deployment.status?.updatedReplicas ?? 0,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+    } catch (error) {
+      throw new Error(`Failed to list deployments: ${errorMessage(error)}`);
+    }
+  }
+
+  async getDeploymentHealth(namespace: string, deploymentName: string): Promise<KubernetesDeploymentHealth> {
+    this.validateTarget(namespace, deploymentName);
+    try {
+      const { body } = await this.apps.readNamespacedDeploymentStatus(deploymentName, namespace);
+      const selector = labelsToSelector(body.spec?.selector.matchLabels);
+      const podsResponse = await this.core.listNamespacedPod(
+        namespace,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        selector,
+      );
+      const pods = podsResponse.body.items.map((pod) => this.normalizePod(pod, namespace));
+      const desiredReplicas = body.spec?.replicas ?? 0;
+      const readyReplicas = body.status?.readyReplicas ?? 0;
+      return {
+        name: deploymentName,
+        namespace,
+        containers: body.spec?.template.spec?.containers.map(({ name, image }) => ({
+          name,
+          ...(image ? { image } : {}),
+        })) ?? [],
+        desiredReplicas,
+        readyReplicas,
+        availableReplicas: body.status?.availableReplicas ?? 0,
+        updatedReplicas: body.status?.updatedReplicas ?? 0,
+        unavailableReplicas: body.status?.unavailableReplicas ?? 0,
+        ready: desiredReplicas > 0
+          && readyReplicas === desiredReplicas
+          && pods.length > 0
+          && pods.every((pod) => pod.phase === "Running" && pod.containers.every(({ ready }) => ready)),
+        pods,
+        totalRestarts: pods.reduce(
+          (total, pod) => total + pod.containers.reduce((podTotal, container) => podTotal + container.restartCount, 0),
+          0,
+        ),
+        conditions: body.status?.conditions?.map(({ type, status, reason, message }) => ({
+          ...(type ? { type } : {}),
+          ...(status ? { status } : {}),
+          ...(reason ? { reason } : {}),
+          ...(message ? { message: redactSensitiveText(message) } : {}),
+        })) ?? [],
+      };
+    } catch (error) {
+      throw new Error(`Failed to inspect deployment: ${errorMessage(error)}`);
     }
   }
 

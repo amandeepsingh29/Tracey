@@ -1,4 +1,5 @@
 import {
+  AgentDeploymentMappingRequestSchema,
   AgentListQuerySchema,
   AgentRegistrationRequestSchema,
   RegisteredAgentRunSearchSchema,
@@ -35,6 +36,7 @@ import { ConnectorSecretVault } from "./connector-secrets.js";
 import { agentRunsToExecutions, codexLogsToExecutions, type ObservedExecution } from "./execution-feed.js";
 import { listRecentCodexForensicTurns, readCodexForensicTurn } from "./codex-forensic-reader.js";
 import { buildCodexExecutionGraph, buildLocalCodexExecutionGraph } from "./execution-graph.js";
+import { KubernetesAdapter } from "@tracey/cloud-adapter";
 
 export function buildServer(config: AppConfig) {
   const server = Fastify({
@@ -80,6 +82,17 @@ export function buildServer(config: AppConfig) {
     investigatorEnabled: config.TRACEY_KUBERNETES_INVESTIGATOR_ENABLED,
     allowedNamespaces: config.TRACEY_KUBERNETES_ALLOWED_NAMESPACES.split(",").map((entry) => entry.trim()).filter(Boolean),
     allowedWorkloads: config.TRACEY_KUBERNETES_ALLOWED_WORKLOADS.split(",").map((entry) => entry.trim()).filter(Boolean),
+  };
+  const createKubernetesInvestigator = () => {
+    if (!kubernetesRuntime.investigatorEnabled) {
+      throw new Error("The Kubernetes investigator connector is not enabled");
+    }
+    return new KubernetesAdapter({
+      allowedNamespaces: kubernetesRuntime.allowedNamespaces,
+      ...(kubernetesRuntime.allowedWorkloads.length > 0
+        ? { allowedWorkloads: kubernetesRuntime.allowedWorkloads }
+        : {}),
+    });
   };
   const createActionExecutor = () => new ApprovedActionExecutor({
       ...(config.TRACEY_ACTION_WEBHOOK_URL ? { webhookUrl: config.TRACEY_ACTION_WEBHOOK_URL } : {}),
@@ -875,6 +888,94 @@ export function buildServer(config: AppConfig) {
       request.log.error({ err: error }, "Agent registry query failed");
       return reply.code(503).send({ error: "The production agent registry is unavailable" });
     }
+  });
+
+  server.get("/v1/kubernetes/namespaces", { preHandler: analystAuth }, async (request, reply) => {
+    try {
+      return { namespaces: await createKubernetesInvestigator().listNamespaces() };
+    } catch (error) {
+      request.log.warn({ err: error }, "Kubernetes namespace discovery failed");
+      return reply.code(503).send({
+        error: error instanceof Error ? error.message : "Kubernetes namespace discovery failed",
+      });
+    }
+  });
+
+  server.get("/v1/kubernetes/deployments", { preHandler: analystAuth }, async (request, reply) => {
+    const parsed = z.object({ namespace: z.string().trim().min(1).max(253) }).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: "A valid Kubernetes namespace is required" });
+    try {
+      return { deployments: await createKubernetesInvestigator().listDeployments(parsed.data.namespace) };
+    } catch (error) {
+      request.log.warn({ err: error, namespace: parsed.data.namespace }, "Kubernetes deployment discovery failed");
+      return reply.code(503).send({
+        error: error instanceof Error ? error.message : "Kubernetes deployment discovery failed",
+      });
+    }
+  });
+
+  server.get("/v1/agents/:agentId/deployment", { preHandler: apiAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for deployment mappings" });
+    const parsed = z.object({ agentId: z.string().uuid() }).safeParse(request.params);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid agent ID" });
+    const mapping = await store.getAgentDeploymentMapping(config.TRACEY_TENANT_ID, parsed.data.agentId);
+    if (!mapping) return reply.code(404).send({ error: "This agent is not linked to a Kubernetes Deployment" });
+    try {
+      const health = await createKubernetesInvestigator().getDeploymentHealth(
+        mapping.namespace,
+        mapping.workloadName,
+      );
+      return { mapping, health, observedAt: new Date().toISOString() };
+    } catch (error) {
+      request.log.warn({ err: error, agentId: parsed.data.agentId }, "Mapped deployment health query failed");
+      return reply.code(503).send({
+        error: error instanceof Error ? error.message : "Mapped deployment health query failed",
+        mapping,
+      });
+    }
+  });
+
+  server.put("/v1/agents/:agentId/deployment", { preHandler: operatorAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for deployment mappings" });
+    const params = z.object({ agentId: z.string().uuid() }).safeParse(request.params);
+    const body = AgentDeploymentMappingRequestSchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.code(400).send({
+        error: "Invalid agent deployment mapping",
+        ...(!body.success ? { issues: body.error.issues } : {}),
+      });
+    }
+    const agent = await store.getAgent(config.TRACEY_TENANT_ID, params.data.agentId);
+    if (!agent) return reply.code(404).send({ error: "Agent not found" });
+    try {
+      const investigator = createKubernetesInvestigator();
+      const health = await investigator.getDeploymentHealth(body.data.namespace, body.data.workloadName);
+      if (body.data.containerName && !health.containers.some(({ name }) => name === body.data.containerName)) {
+        return reply.code(422).send({
+          error: `Container ${body.data.containerName} does not exist in ${body.data.namespace}/${body.data.workloadName}`,
+        });
+      }
+      const mapping = await store.saveAgentDeploymentMapping(
+        config.TRACEY_TENANT_ID,
+        params.data.agentId,
+        body.data,
+      );
+      return { mapping, health, observedAt: new Date().toISOString() };
+    } catch (error) {
+      request.log.warn({ err: error, agentId: params.data.agentId }, "Agent deployment mapping validation failed");
+      return reply.code(422).send({
+        error: error instanceof Error ? error.message : "The Kubernetes Deployment could not be validated",
+      });
+    }
+  });
+
+  server.delete("/v1/agents/:agentId/deployment", { preHandler: operatorAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for deployment mappings" });
+    const parsed = z.object({ agentId: z.string().uuid() }).safeParse(request.params);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid agent ID" });
+    const deleted = await store.deleteAgentDeploymentMapping(config.TRACEY_TENANT_ID, parsed.data.agentId);
+    if (!deleted) return reply.code(404).send({ error: "This agent has no Kubernetes Deployment mapping" });
+    return reply.code(204).send();
   });
 
   server.get("/v1/executions", { preHandler: apiAuth }, async (request, reply) => {

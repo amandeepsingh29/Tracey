@@ -32,6 +32,48 @@ export type Agent = {
   updatedAt: string;
 };
 
+export type KubernetesDeploymentSummary = {
+  name: string;
+  namespace: string;
+  containers: Array<{ name: string; image?: string }>;
+  desiredReplicas: number;
+  readyReplicas: number;
+  availableReplicas: number;
+  updatedReplicas: number;
+};
+
+export type AgentDeploymentMapping = {
+  agentId: string;
+  connectorId: "kubernetes";
+  namespace: string;
+  workloadKind: "Deployment";
+  workloadName: string;
+  containerName?: string;
+  validatedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentDeploymentHealth = KubernetesDeploymentSummary & {
+  ready: boolean;
+  unavailableReplicas: number;
+  pods: Array<{
+    name: string;
+    namespace: string;
+    phase: string;
+    reason?: string;
+    containers: Array<{ name: string; ready: boolean; restartCount: number; state: string }>;
+  }>;
+  totalRestarts: number;
+  conditions: Array<{ type?: string; status?: string; reason?: string; message?: string }>;
+};
+
+export type AgentDeployment = {
+  mapping: AgentDeploymentMapping;
+  health: AgentDeploymentHealth;
+  observedAt: string;
+};
+
 export type AgentRun = {
   runId: string;
   traceId: string;

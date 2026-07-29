@@ -9,6 +9,7 @@ describe("bounded agentic investigator", () => {
   it("exposes remediation planning but no direct mutation adapter tools", () => {
     assert.ok(agentToolNames.includes("propose_remediation"));
     assert.ok(agentToolNames.includes("resolve_application_status"));
+    assert.ok(agentToolNames.includes("get_agent_deployment"));
     for (const tool of ["search_failed_agent_runs", "search_codex_logs", "get_container_restarts", "get_recent_changes", "search_traces", "inspect_trace", "query_metrics", "query_logs", "inspect_exceptions", "compare_before_after", "calculate_error_rate", "calculate_latency_change", "determine_affected_services", "verify_incident_recovery"]) {
       assert.ok(agentToolNames.includes(tool), `${tool} must be registered`);
     }
@@ -157,6 +158,25 @@ describe("bounded agentic investigator", () => {
     });
     assert.equal(evidence[0]?.signal, "tracey.application.status");
     assert.match(evidence[0]?.observation ?? "", /1 registry match.*0 matching pods/);
+  });
+
+  it("creates citable evidence for a validated agent deployment mapping", () => {
+    const evidence = collectCitableEvidence("get_agent_deployment", {
+      agentId: crypto.randomUUID(),
+    }, {
+      mapping: {
+        namespace: "production",
+        workloadName: "notes-api",
+      },
+      health: {
+        desiredReplicas: 3,
+        readyReplicas: 2,
+        totalRestarts: 4,
+      },
+    });
+    assert.equal(evidence[0]?.sourceType, "kubernetes");
+    assert.equal(evidence[0]?.sourceId, "agent-deployment:production/notes-api");
+    assert.match(evidence[0]?.observation ?? "", /2\/3 replicas ready.*4 container restarts/);
   });
 
   it("creates citable evidence for a durable remediation proposal", () => {

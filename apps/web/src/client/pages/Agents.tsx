@@ -1,15 +1,15 @@
 "use client";
 
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ArrowRight, Bot, Braces, CheckCircle2, Clock3, Code2, Copy, Laptop, Plus, RefreshCw, Search, ShieldCheck, TerminalSquare, TriangleAlert } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, Bot, Braces, CheckCircle2, Clock3, Code2, Copy, Laptop, Link2, Plus, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Button, EmptyState, ErrorState, Field, LoadingState, MetricCard, Modal, PageHeader, Panel, StatusChip } from "../components/ui";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { duration, relativeTime, titleCase } from "../lib/format";
-import type { Agent } from "../types";
+import type { Agent, AgentDeployment } from "../types";
 
 export function AgentsPage() {
   const params = useSearchParams();
@@ -210,7 +210,7 @@ function ConnectAgentModal({ open, onClose }: { open: boolean; onClose: () => vo
     {step === "source" && <div className="connection-body"><div className="producer-choice-grid">{(Object.entries(producerSetup) as Array<[ProducerType, typeof setup]>).map(([value, item]) => { const Icon = item.icon; return <button type="button" key={value} className={producerType === value ? "active" : ""} onClick={() => setProducerType(value)}><Icon /><div><strong>{item.name}</strong><p>{item.description}</p></div>{producerType === value && <CheckCircle2 />}</button>; })}</div><footer className="modal-actions"><Button variant="secondary" onClick={close}>Cancel</Button><Button onClick={() => setStep("setup")}>Continue<ArrowRight size={15} /></Button></footer></div>}
     {step === "setup" && <div className="connection-body"><ol className="setup-checklist">{setup.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}</ol><div className="configuration-block"><header><span>Configuration</span><button type="button" onClick={() => void copyConfiguration()}>{copied ? <CheckCircle2 /> : <Copy />}{copied ? "Copied" : "Copy"}</button></header><pre>{setup.configuration}</pre></div><p className="connection-note">Tracey will not simulate an execution. If no matching telemetry arrives, verification remains incomplete and explains what to check.</p><footer className="modal-actions"><Button variant="secondary" onClick={() => setStep("source")}>Back</Button><Button onClick={() => setStep("identity")}>I configured it<ArrowRight size={15} /></Button></footer></div>}
     {step === "identity" && <form className="form-stack connection-form" onSubmit={submit}><div className="form-grid"><Field label="Display name" hint="A readable name shown inside Tracey"><input name="displayName" required maxLength={128} defaultValue={setup.displayName} placeholder="Support triage agent" /></Field><Field label="Service name" hint="Must exactly match OpenTelemetry service.name"><input name="serviceName" required pattern="[A-Za-z0-9_.\-/ ]+" defaultValue={setup.serviceName} placeholder="support-agent-api" /></Field><Field label="Environment" hint="Must match Tracey’s configured telemetry scope"><input name="environment" required defaultValue="development" /></Field><Field label="Detected contract"><input value={`${setup.normalizationProfile} · ${setup.telemetryContractVersion}`} readOnly /></Field></div>{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button type="button" variant="secondary" onClick={() => setStep("setup")}>Back</Button><Button disabled={registration.isPending}>{registration.isPending ? "Registering…" : "Register and verify"}<ArrowRight size={15} /></Button></footer></form>}
-    {step === "verify" && registered && <div className="connection-body verification-step"><div className="registered-identity"><CheckCircle2 /><div><strong>{registered.displayName} is registered</strong><code>{registered.serviceName}</code></div></div>{verification?.observed ? <div className="verification-success"><CheckCircle2 /><div><strong>Execution observed</strong><p>Tracey found {verification.count} matching execution{verification.count === 1 ? "" : "s"} in the last seven days.</p></div></div> : verification ? <div className="verification-waiting"><RefreshCw /><div><strong>Waiting for the first execution</strong><p>{verification.limitation ?? `No execution matching ${registered.serviceName} has arrived yet. Run the agent once, wait a few seconds, then retry.`}</p></div></div> : <div className="verification-waiting"><Activity /><div><strong>Ready to query live evidence</strong><p>Run one normal agent request first if you have not already.</p></div></div>}{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button variant="secondary" onClick={() => verify.mutate(registered)} disabled={verify.isPending}>{verify.isPending ? "Checking evidence…" : verification ? "Check again" : "Verify execution"}</Button>{verification?.observed ? <Button onClick={() => { close(); router.push(registered.producerType.startsWith("codex") ? "/runs" : `/agents/${registered.agentId}`); }}>View execution<ArrowRight size={15} /></Button> : <Button variant="ghost" onClick={() => { close(); router.push(`/agents/${registered.agentId}`); }}>Finish later</Button>}</footer></div>}
+    {step === "verify" && registered && <div className="connection-body verification-step"><div className="registered-identity"><CheckCircle2 /><div><strong>{registered.displayName} is registered</strong><code>{registered.serviceName}</code></div></div>{verification?.observed ? <div className="verification-success"><CheckCircle2 /><div><strong>Execution observed</strong><p>Tracey found {verification.count} matching execution{verification.count === 1 ? "" : "s"} in the last seven days.</p></div></div> : verification ? <div className="verification-waiting"><RefreshCw /><div><strong>Waiting for the first execution</strong><p>{verification.limitation ?? `No execution matching ${registered.serviceName} has arrived yet. Run the agent once, wait a few seconds, then retry.`}</p></div></div> : <div className="verification-waiting"><Activity /><div><strong>Ready to query live evidence</strong><p>Run one normal agent request first if you have not already.</p></div></div>}{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button variant="secondary" onClick={() => verify.mutate(registered)} disabled={verify.isPending}>{verify.isPending ? "Checking evidence…" : verification ? "Check again" : "Verify execution"}</Button><Button onClick={() => { close(); router.push(`/agents/${registered.agentId}?linkDeployment=true`); }}><Link2 size={15} />Link deployment</Button><Button variant="ghost" onClick={() => { close(); router.push(verification?.observed && registered.producerType.startsWith("codex") ? "/runs" : `/agents/${registered.agentId}`); }}>{verification?.observed ? "Skip and view activity" : "Finish later"}</Button></footer></div>}
   </Modal>;
 }
 
@@ -218,8 +218,23 @@ export function AgentDetailPage() {
   const params = useParams<{ agentId: string }>();
   const agentId = params.agentId ?? "";
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const [deploymentOpen, setDeploymentOpen] = useState(searchParams.get("linkDeployment") === "true");
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.agents() });
   const agent = agents.data?.agents.find((item) => item.agentId === agentId);
+  const deployment = useQuery({
+    queryKey: ["agent-deployment", agentId],
+    queryFn: async () => {
+      try {
+        return await api.agentDeployment(agentId);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) return null;
+        throw error;
+      }
+    },
+    enabled: Boolean(agent),
+    retry: false,
+  });
   const end = Date.now(), start = end - 24 * 60 * 60 * 1_000;
   const runs = useQuery({ queryKey: ["agent-runs", agentId, start], queryFn: () => api.agentRuns(agentId, { start, end, limit: 50 }), enabled: Boolean(agent) && !["codex_desktop", "codex_cli"].includes(agent?.producerType ?? "") });
   const list = runs.data?.runs ?? [];
@@ -244,8 +259,96 @@ export function AgentDetailPage() {
     <section className="metrics-grid"><MetricCard label="Runs · 24h" value={runs.error ? "—" : list.length} detail="Observed in SigNoz" icon={Activity} /><MetricCard label="Failure rate" value={list.length ? `${((failed / list.length) * 100).toFixed(1)}%` : "—"} detail={list.length ? `${failed} failed runs` : "No samples available"} icon={TriangleAlert} tone={failed ? "danger" : "default"} /><MetricCard label="P50 / P95 latency" value={`${duration(p50)} / ${duration(p95)}`} detail={durations.length ? `${durations.length} measured runs` : "No duration samples"} icon={Clock3} /><MetricCard label="Evidence complete" value={list.length ? `${Math.round((complete / list.length) * 100)}%` : "—"} detail="Required telemetry present" icon={ShieldCheck} /><MetricCard label="Observed tokens" value={tokenUsage ? tokenUsage.toLocaleString() : "—"} detail={tokenUsage ? "Sanitized model spans" : "Token attributes not emitted"} icon={Braces} /><MetricCard label="Estimated cost" value={costNano ? `$${(costNano / 1_000_000_000).toFixed(4)}` : "—"} detail={costNano ? "Emitted pricing telemetry" : "Cost attributes not emitted"} icon={Activity} /></section>
     <div className="two-column"><Panel title="Identity and deployment" subtitle="Registration metadata used to scope production evidence."><dl className="detail-list"><div><dt>Service</dt><dd><code>{agent.serviceName}</code></dd></div><div><dt>Environment</dt><dd>{agent.environment}</dd></div><div><dt>Producer</dt><dd>{titleCase(agent.producerType)}</dd></div><div><dt>Status</dt><dd><StatusChip value={agent.status} /></dd></div><div><dt>Normalization</dt><dd>{agent.normalizationProfile}</dd></div><div><dt>Contract</dt><dd>{agent.telemetryContractVersion}</dd></div></dl></Panel><Panel title="Telemetry readiness" subtitle="Tracey reports observed completeness—it does not invent missing signals.">{runs.error ? <ErrorState error={runs.error} onRetry={() => void runs.refetch()} /> : list.length === 0 ? <EmptyState icon={Braces} title="No runs observed in this window" description={agent.producerType.startsWith("codex") ? "Codex telemetry is conversation-based. Start an investigation with an exact conversation ID." : "Confirm the service is exporting Tracey’s agent-run contract to the connected OpenTelemetry Collector."} /> : <div className="readiness-list"><div><CheckMark ok={true} label="Root agent runs discovered" /><CheckMark ok={complete > 0} label="Complete evidence contract observed" /><CheckMark ok={list.some(({ model }) => Boolean(model))} label="Model identity attributes observed" /></div></div>}</Panel></div>
     <Panel title="Recent runs" subtitle="Latest observed agent activity from the last 24 hours.">{runs.isLoading ? <LoadingState /> : runs.error ? <ErrorState error={runs.error} /> : list.length === 0 ? <EmptyState title="No recent runs" description="Tracey will show live runs as soon as SigNoz returns matching telemetry." /> : <div className="table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Duration</th><th>Model</th><th>Started</th></tr></thead><tbody>{list.slice(0, 20).map((run) => <tr key={`${run.runId}-${run.traceId}`} onClick={() => router.push(`/runs/${run.traceId}?start=${start}&end=${end}`)} tabIndex={0}><td><code>{run.runId}</code></td><td><StatusChip value={run.status ?? run.outcome ?? "unknown"} /></td><td>{duration(run.durationMs)}</td><td>{run.model ?? "—"}</td><td>{relativeTime(run.startedAt ?? run.startTime)}</td></tr>)}</tbody></table></div>}</Panel>
-    <div className="two-column"><Panel title="Models and tool performance" subtitle="Derived only from sanitized spans in the sampled runs."><dl className="detail-list"><div><dt>Models observed</dt><dd>{models.length ? models.join(", ") : "Not emitted"}</dd></div><div><dt>Tool calls</dt><dd>{toolSpans.length || "Not emitted"}</dd></div><div><dt>Tool failures</dt><dd>{toolSpans.length ? toolSpans.filter((span) => span.hasError).length : "—"}</dd></div><div><dt>Average tool latency</dt><dd>{toolSpans.length ? duration(toolSpans.reduce((sum, span) => sum + Number(span.durationMs ?? 0), 0) / toolSpans.length) : "—"}</dd></div></dl></Panel><Panel title="Deployment mapping" subtitle="Connect this agent identity to the infrastructure that runs it."><dl className="detail-list"><div><dt>Deployment identity</dt><dd><code>{agent.serviceName}</code></dd></div><div><dt>Environment</dt><dd>{agent.environment}</dd></div><div><dt>Kubernetes workload</dt><dd>Not linked in agent metadata</dd></div></dl><Button variant="secondary" onClick={() => router.push("/connectors?connector=kubernetes")}>Configure Kubernetes</Button></Panel></div>
+    <div className="two-column"><Panel title="Models and tool performance" subtitle="Derived only from sanitized spans in the sampled runs."><dl className="detail-list"><div><dt>Models observed</dt><dd>{models.length ? models.join(", ") : "Not emitted"}</dd></div><div><dt>Tool calls</dt><dd>{toolSpans.length || "Not emitted"}</dd></div><div><dt>Tool failures</dt><dd>{toolSpans.length ? toolSpans.filter((span) => span.hasError).length : "—"}</dd></div><div><dt>Average tool latency</dt><dd>{toolSpans.length ? duration(toolSpans.reduce((sum, span) => sum + Number(span.durationMs ?? 0), 0) / toolSpans.length) : "—"}</dd></div></dl></Panel><DeploymentPanel deployment={deployment.data} loading={deployment.isLoading} error={deployment.error} onRetry={() => void deployment.refetch()} onEdit={() => setDeploymentOpen(true)} /></div>
+    <LinkDeploymentModal agent={agent} current={deployment.data ?? undefined} open={deploymentOpen} onClose={() => { setDeploymentOpen(false); router.replace(`/agents/${agent.agentId}`, { scroll: false }); }} />
   </div>;
 }
 
 function CheckMark({ ok, label }: { ok: boolean; label: string }) { return <div className={ok ? "check-row check-ok" : "check-row"}><span>{ok ? "✓" : "!"}</span><strong>{label}</strong></div>; }
+
+function DeploymentPanel({ deployment, loading, error, onRetry, onEdit }: {
+  deployment: AgentDeployment | null | undefined;
+  loading: boolean;
+  error: Error | null;
+  onRetry: () => void;
+  onEdit: () => void;
+}) {
+  if (loading) return <Panel title="Deployment mapping" subtitle="Resolving the infrastructure that runs this agent."><LoadingState label="Loading deployment health" /></Panel>;
+  if (error) return <Panel title="Deployment mapping" subtitle="Tracey could not read the mapped infrastructure."><ErrorState error={error} onRetry={onRetry} /><Button variant="secondary" onClick={onEdit}>Edit mapping</Button></Panel>;
+  if (!deployment) return <Panel title="Deployment mapping" subtitle="Connect telemetry to the Kubernetes Deployment that runs this agent."><EmptyState icon={Server} title="No deployment linked" description="Link a live Deployment so Tracey can combine run failures with replicas, pods, restarts, images, and rollout state." action={<Button variant="secondary" onClick={onEdit}><Link2 size={15} />Link deployment</Button>} /></Panel>;
+  const { mapping, health } = deployment;
+  return <Panel title="Deployment health" subtitle={`${mapping.namespace}/${mapping.workloadName} · observed ${relativeTime(deployment.observedAt)}`}>
+    <div className={health.ready ? "deployment-health healthy" : "deployment-health unhealthy"}><span /><div><strong>{health.ready ? "Healthy rollout" : "Deployment needs attention"}</strong><p>{health.readyReplicas}/{health.desiredReplicas} replicas ready · {health.pods.length} pods · {health.totalRestarts} restarts</p></div><StatusChip value={health.ready ? "ready" : "degraded"} /></div>
+    <dl className="detail-list"><div><dt>Workload</dt><dd><code>{mapping.workloadKind}/{mapping.workloadName}</code></dd></div><div><dt>Container</dt><dd>{mapping.containerName ?? "All containers"}</dd></div><div><dt>Image</dt><dd>{health.containers.find(({ name }) => !mapping.containerName || name === mapping.containerName)?.image ?? "Not reported"}</dd></div><div><dt>Updated / available</dt><dd>{health.updatedReplicas} / {health.availableReplicas}</dd></div></dl>
+    <Button variant="secondary" onClick={onEdit}>Edit mapping</Button>
+  </Panel>;
+}
+
+function LinkDeploymentModal({ agent, current, open, onClose }: {
+  agent: Agent;
+  current: AgentDeployment | undefined;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [namespace, setNamespace] = useState(current?.mapping.namespace ?? "");
+  const [workloadName, setWorkloadName] = useState(current?.mapping.workloadName ?? "");
+  const [containerName, setContainerName] = useState(current?.mapping.containerName ?? "");
+  useEffect(() => {
+    if (!open) return;
+    setNamespace(current?.mapping.namespace ?? "");
+    setWorkloadName(current?.mapping.workloadName ?? "");
+    setContainerName(current?.mapping.containerName ?? "");
+  }, [current, open]);
+  const namespaces = useQuery({ queryKey: ["kubernetes-namespaces"], queryFn: api.kubernetesNamespaces, enabled: open, retry: false });
+  useEffect(() => {
+    if (!namespace && namespaces.data?.namespaces[0]) setNamespace(namespaces.data.namespaces[0]);
+  }, [namespace, namespaces.data]);
+  const deployments = useQuery({
+    queryKey: ["kubernetes-deployments", namespace],
+    queryFn: () => api.kubernetesDeployments(namespace),
+    enabled: open && Boolean(namespace),
+    retry: false,
+  });
+  useEffect(() => {
+    const available = deployments.data?.deployments ?? [];
+    const first = available[0];
+    if (first && !available.some(({ name }) => name === workloadName)) {
+      setWorkloadName(first.name);
+      setContainerName("");
+    }
+  }, [deployments.data, workloadName]);
+  const selected = deployments.data?.deployments.find(({ name }) => name === workloadName);
+  const save = useMutation({
+    mutationFn: () => api.saveAgentDeployment(agent.agentId, {
+      namespace,
+      workloadName,
+      ...(containerName ? { containerName } : {}),
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["agent-deployment", agent.agentId] });
+      onClose();
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteAgentDeployment(agent.agentId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["agent-deployment", agent.agentId] });
+      onClose();
+    },
+  });
+  return <Modal open={open} onClose={onClose} title="Link Kubernetes deployment" description={`Choose the live Deployment that runs ${agent.displayName}. Tracey validates the target before saving it.`}>
+    <div className="form-stack">
+      {namespaces.isLoading ? <LoadingState label="Discovering connected namespaces" /> : namespaces.error ? <ErrorState error={namespaces.error} onRetry={() => void namespaces.refetch()} /> : <>
+        <Field label="Namespace" hint="Discovered from the connected Kubernetes API"><select value={namespace} onChange={(event) => { setNamespace(event.target.value); setWorkloadName(""); setContainerName(""); }}>{namespaces.data?.namespaces.map((value) => <option key={value}>{value}</option>)}</select></Field>
+        {deployments.isLoading ? <LoadingState label="Discovering deployments" /> : deployments.error ? <ErrorState error={deployments.error} onRetry={() => void deployments.refetch()} /> : deployments.data?.deployments.length ? <>
+          <Field label="Deployment" hint="Only real Deployments returned by Kubernetes are selectable"><select value={workloadName} onChange={(event) => { setWorkloadName(event.target.value); setContainerName(""); }}>{deployments.data.deployments.map((item) => <option value={item.name} key={item.name}>{item.name} · {item.readyReplicas}/{item.desiredReplicas} ready</option>)}</select></Field>
+          <Field label="Container" hint="Optional; choose the agent container when the pod has sidecars"><select value={containerName} onChange={(event) => setContainerName(event.target.value)}><option value="">All containers</option>{selected?.containers.map((container) => <option value={container.name} key={container.name}>{container.name}{container.image ? ` · ${container.image}` : ""}</option>)}</select></Field>
+          {selected && <div className="deployment-preview"><Server /><div><strong>{selected.namespace}/{selected.name}</strong><p>{selected.readyReplicas}/{selected.desiredReplicas} ready · {selected.containers.length} container{selected.containers.length === 1 ? "" : "s"}</p></div></div>}
+        </> : <EmptyState icon={Server} title="No Deployments found" description={`Kubernetes returned no Deployments in ${namespace || "this namespace"}.`} />}
+      </>}
+      {(save.error || remove.error) && <p className="form-error" role="alert">{(save.error ?? remove.error)?.message}</p>}
+      <footer className="modal-actions">{current && <Button variant="ghost" onClick={() => remove.mutate()} disabled={remove.isPending}><Trash2 size={15} />Unlink</Button>}<Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={() => save.mutate()} disabled={!namespace || !workloadName || save.isPending}>{save.isPending ? "Validating…" : "Validate and link"}</Button></footer>
+    </div>
+  </Modal>;
+}
