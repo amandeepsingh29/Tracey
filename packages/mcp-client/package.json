@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@tracey/instrumentation": "workspace:*",
     "@tracey/telemetry": "workspace:*"
   },
