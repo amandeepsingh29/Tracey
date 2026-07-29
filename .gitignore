@@ -15,6 +15,7 @@ coverage/
 .nyc_output/
 playwright-report/
 test-results/
+.tracey/
 .claude/
 __pycache__/
 *.py[cod]

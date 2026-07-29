@@ -107,34 +107,22 @@ pnpm install
 pnpm build
 ```
 
-Load the local configuration and apply database migrations:
+Start the complete local product:
 
 ```bash
-set -a
-source .env
-set +a
-./scripts/migrate.sh
+pnpm tracey:up
 ```
 
-Start the four Tracey services in separate terminals:
+The runtime manager validates `.env`, checks required ports, starts repository-owned PostgreSQL and OpenTelemetry Collector containers, applies checksum-verified migrations, builds Tracey, starts each configured service, waits for real health endpoints, and prints the UI/API URLs. It does not treat an unconfigured collector or executor as healthy.
+
+Inspect or stop the same runtime:
 
 ```bash
-# API — http://localhost:3000
-pnpm --filter @tracey/api start
-
-# Restricted executor — http://localhost:3002
-pnpm --filter @tracey/executor start
-
-# Trigger and scheduled-action worker — health on http://localhost:3001
-TRACEY_API_URL=http://127.0.0.1:3000 pnpm --filter @tracey/worker start
-
-# Web application — http://localhost:8501
-TRACEY_API_URL=http://127.0.0.1:3000 \
-TRACEY_UI_ACCESS_TOKEN="$TRACEY_API_BEARER_TOKEN" \
-pnpm --filter @tracey/web start
+pnpm tracey:status
+pnpm tracey:down
 ```
 
-Each terminal must inherit the values from the root `.env`. The executor starts only when its dedicated token and Kubernetes scope are configured. The API and web application can be used without enabling infrastructure mutation.
+Runtime process metadata and logs live under ignored `.tracey/`. Shutdown signals only the recorded Tracey process groups and uses fixed Compose project identities; it preserves PostgreSQL volumes and external telemetry. The executor starts only when its enable flag, dedicated token, namespace scope, and workload scope are all configured.
 
 ## Onboard a production agent
 
