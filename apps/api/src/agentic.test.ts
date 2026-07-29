@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { InvestigationService } from "@tracey/investigation";
 import type { InvestigationMessage, PostgresStore } from "@tracey/postgres-store";
 import type { AutonomyService } from "./autonomy-service.js";
-import { AgenticInvestigator, agentToolNames, collectCitableEvidence, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
+import { AgenticInvestigator, agentToolNames, collectCitableEvidence, durableProposalMessage, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
 
 describe("bounded agentic investigator", () => {
   it("exposes remediation planning but no direct mutation adapter tools", () => {
@@ -192,6 +192,20 @@ describe("bounded agentic investigator", () => {
     assert.equal(evidence[0]?.sourceType, "tracey");
     assert.equal(evidence[0]?.sourceId, `action:${proposalId}`);
     assert.match(evidence[0]?.observation ?? "", /awaiting_approval/);
+  });
+
+  it("returns the durable approval result when model synthesis cannot finish", () => {
+    assert.equal(durableProposalMessage({
+      action: {
+        proposalId: "proposal-123",
+        target: "notes-production/notes-api",
+        status: "awaiting_approval",
+      },
+      decision: {
+        decision: "require_approval",
+        reasons: ["approval mode requires an administrator decision"],
+      },
+    }), "Change proposal proposal-123 is ready for confirmation for notes-production/notes-api. Review the approval card and approve or reject it; nothing has been executed.");
   });
 
   it("resolves relative Codex windows deterministically in epoch milliseconds", () => {
@@ -409,6 +423,7 @@ describe("bounded agentic investigator", () => {
   it("routes model remediation plans through the policy service", async (context) => {
     const messages: InvestigationMessage[] = [];
     let evaluated = false;
+    const mappedAgentId = crypto.randomUUID();
     const store = {
       appendInvestigationMessage: async (_tenantId: string, input: Omit<InvestigationMessage, "messageId" | "createdAt">) => {
         const saved = { ...input, messageId: crypto.randomUUID(), evidenceRefs: input.evidenceRefs ?? [], createdAt: new Date().toISOString() } as InvestigationMessage;
@@ -417,6 +432,14 @@ describe("bounded agentic investigator", () => {
       },
       listInvestigationMessages: async () => messages,
       recordAgentToolAudit: async () => undefined,
+      listAgents: async () => [{
+        agentId: mappedAgentId, displayName: "Sample Agent", serviceName: "sample-agent-api",
+        environment: "test", status: "active", producerType: "custom_otel",
+      }],
+      getAgentDeploymentMapping: async () => ({
+        agentId: mappedAgentId, namespace: "production", workloadName: "sample-workload",
+        containerName: "api", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      }),
       getAutonomyPolicy: async () => ({
         policyId: crypto.randomUUID(), scopeType: "global", scopeId: "default", version: 1, enabled: true,
         createdBy: "admin", updatedBy: "admin", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -425,9 +448,11 @@ describe("bounded agentic investigator", () => {
           maximumAutomaticRisk: "medium", maxReplicas: 10, maxConcurrentActions: 1, cooldownMinutes: 0 },
       }),
     } as unknown as PostgresStore;
+    let verificationServiceName: string | undefined;
     const autonomy = {
-      evaluatePlan: async () => {
+      evaluatePlan: async (input: { plan: { verification: { serviceName: string } } }) => {
         evaluated = true;
+        verificationServiceName = input.plan.verification.serviceName;
         return { decision: { decision: "require_approval", reasons: ["approval mode"], evaluatedAt: new Date().toISOString() }, action: { status: "awaiting_approval" } };
       },
     } as unknown as AutonomyService;
@@ -454,6 +479,7 @@ describe("bounded agentic investigator", () => {
     const agent = new AgenticInvestigator({ apiKey: "test", model: "test-model", tenantId: "tenant-a", environment: "test" }, {} as InvestigationService, store, autonomy);
     const result = await agent.chat(crypto.randomUUID(), "Restart sample-workload", { subject: "analyst-a", roles: ["analyst"] });
     assert.equal(evaluated, true);
+    assert.equal(verificationServiceName, "sample-agent-api");
     assert.equal(call, 3);
     assert.equal(result.content, "Plan recorded for approval.");
   });

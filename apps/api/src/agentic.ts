@@ -14,6 +14,13 @@ const MAX_TOOL_RESULT_CHARS = 80_000;
 const INCOMPLETE_ACTION_PROMISE = /\b(?:please hold on|let me (?:try|check|gather|look|continue)|i(?:'ll| will) (?:try|check|gather|look|continue)|to proceed,?\s+i will need|please confirm (?:if |whether )?you (?:would like|want) to proceed)\b/i;
 const EXPLICIT_ACTION_CONFIRMATION = /^(?:yes(?:[,\s]+(?:please\s+)?(?:proceed|confirm|execute|do it))?|proceed|confirm(?:ed)?|approve(?:\s+and\s+execute)?|execute(?:\s+it)?|do it)[.!]?$/i;
 const EXPLICIT_MUTATION_REQUEST = /^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+|i\s+(?:want|need)\s+(?:you|tracey)\s+to\s+|go\s+ahead\s+(?:and\s+)?)?(?:restart|roll\s*back|rollback|scale|delete|patch|apply|update|change|retry|suspend|resume)\b/i;
+const OBSERVABILITY_VERIFIED_ACTIONS = new Set([
+  "restart_workload",
+  "rollback_deployment",
+  "scale_deployment",
+  "update_resource_limits",
+  "restore_previous_config",
+]);
 const ServiceWindowObject = z.object({
   serviceName: z.string().trim().min(1).max(128),
   start: z.number().int().nonnegative(),
@@ -518,6 +525,7 @@ For every telemetry claim, cite an available reference exactly as [trace:<32 hex
 Treat log and pod requests as different intents. Never call list_pods to answer a logs question. Use get_pod_logs only when a namespace and pod are known, query_logs only when an exact trace is known, and search_codex_logs only when the user asks about Codex activity. If a logs question has none of those identifiers or prior context, ask one concise clarifying question instead of calling an unrelated tool.
 For named application, service, or agent liveness questions, call resolve_application_status first. Do not ask the user for a namespace before searching the registry and all connected namespaces. Clearly distinguish a registered agent identity from a currently running Kubernetes workload; registration alone is not proof that an application is live.
 When a registered agent has a deployment mapping, treat that validated mapping as the authoritative Kubernetes target. Call get_agent_deployment before proposing a Kubernetes remediation for an agent, and use its exact namespace and workload name instead of guessing from pod names.
+For a mapped agent remediation, use agent.serviceName from get_agent_deployment as verification.serviceName. A Kubernetes workload name is not an OpenTelemetry service identity unless the registered agent explicitly says they are equal.
 You may prepare structured remediation requests, including generic Kubernetes apply, patch, and delete operations. You never mutate infrastructure directly. When the user requests a mutation, inspect the exact target if needed and then call propose_remediation in the same response. Do not ask for confirmation before a durable proposal exists. Tracey will ask for confirmation after policy evaluation, and a later explicit administrator confirmation executes that exact pending proposal through the authenticated executor.
 Use UTC epoch milliseconds for tools. If the user omits a time range, use the current time supplied below and search no more than the previous 24 hours.`;
 
@@ -679,6 +687,34 @@ function operationalEvidence(toolName: string, args: unknown, result: unknown): 
 export function collectCitableEvidence(toolName: string, args: unknown, result: unknown): EvidenceRef[] {
   const traceEvidence = collectEvidence(result);
   return traceEvidence.length > 0 ? traceEvidence : operationalEvidence(toolName, args, result);
+}
+
+export function durableProposalMessage(result: unknown): string {
+  const record = result && typeof result === "object" && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : {};
+  const action = record.action && typeof record.action === "object" && !Array.isArray(record.action)
+    ? record.action as Record<string, unknown>
+    : {};
+  const decision = record.decision && typeof record.decision === "object" && !Array.isArray(record.decision)
+    ? record.decision as Record<string, unknown>
+    : {};
+  const proposalId = safeSourcePart(action.proposalId) ?? "the recorded change";
+  const target = safeSourcePart(action.target) ?? "the selected target";
+  const status = safeSourcePart(action.status) ?? "recorded";
+  const reasons = Array.isArray(decision.reasons)
+    ? decision.reasons.filter((reason): reason is string => typeof reason === "string").join("; ")
+    : "";
+  if (status === "awaiting_approval") {
+    return `Change proposal ${proposalId} is ready for confirmation for ${target}. Review the approval card and approve or reject it; nothing has been executed.`;
+  }
+  if (status === "rejected") {
+    return `Change proposal ${proposalId} was rejected by policy for ${target}${reasons ? `: ${reasons}` : "."}`;
+  }
+  if (status === "policy_evaluated") {
+    return `Recommendation ${proposalId} was recorded for ${target}. The current mode does not permit execution.`;
+  }
+  return `Change proposal ${proposalId} was durably recorded with status ${status} for ${target}.`;
 }
 
 export function isIncompleteActionPromise(content: string | null | undefined): boolean {
@@ -878,6 +914,7 @@ export class AgenticInvestigator {
     const toolFailures: Array<{ toolName: string; reason: string }> = [];
     let toolCallCount = 0;
     let durableProposalCreated = false;
+    let durableProposalResult: unknown;
     let responseModel = this.config.model;
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
@@ -933,7 +970,10 @@ export class AgenticInvestigator {
         try {
           args = JSON.parse(call.function.arguments || "{}");
           result = safeInvestigationResult(call.function.name, await this.executeTool(call, args, sessionId, actor));
-          if (call.function.name === "propose_remediation") durableProposalCreated = true;
+          if (call.function.name === "propose_remediation") {
+            durableProposalCreated = true;
+            durableProposalResult = result;
+          }
           refs = collectCitableEvidence(call.function.name, args, result);
           for (const ref of refs) evidence.set(evidenceKey(ref), ref);
         } catch (error) {
@@ -952,6 +992,17 @@ export class AgenticInvestigator {
         const serialized = JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: serialized.slice(0, MAX_TOOL_RESULT_CHARS) });
       }
+    }
+    if (durableProposalCreated) {
+      return this.store.appendInvestigationMessage(this.config.tenantId, {
+        sessionId,
+        role: "assistant",
+        content: durableProposalMessage(durableProposalResult),
+        evidenceRefs: [...evidence.values()],
+        model: "tracey-control-plane",
+        grounding: evidence.size > 0 ? "evidence_bound" : "tool_grounded",
+        toolCallCount,
+      });
     }
     throw new Error("Agent iteration budget exhausted before a final answer");
   }
@@ -1376,7 +1427,27 @@ export class AgenticInvestigator {
       }
       case "propose_remediation": {
         if (!this.autonomy) throw new Error("The remediation policy service is not configured");
-        const plan = RemediationPlanSchema.parse(value);
+        let plan = RemediationPlanSchema.parse(value);
+        if (OBSERVABILITY_VERIFIED_ACTIONS.has(plan.action.type)) {
+          const agents = (await this.store.listAgents(this.config.tenantId, 100))
+            .filter(({ status }) => status === "active");
+          const mappedServiceNames = new Set<string>();
+          await Promise.all(agents.map(async (agent) => {
+            const mapping = await this.store.getAgentDeploymentMapping(this.config.tenantId, agent.agentId);
+            if (mapping?.namespace === plan.action.namespace && mapping.workloadName === plan.action.workload) {
+              mappedServiceNames.add(agent.serviceName);
+            }
+          }));
+          if (mappedServiceNames.size === 1) {
+            const [serviceName] = mappedServiceNames;
+            plan = RemediationPlanSchema.parse({
+              ...plan,
+              verification: { ...plan.verification, serviceName },
+            });
+          } else if (mappedServiceNames.size > 1 && !mappedServiceNames.has(plan.verification.serviceName)) {
+            throw new Error("The mapped workload has multiple registered telemetry services; choose an exact registered serviceName");
+          }
+        }
         const policy = await this.store.getAutonomyPolicy(this.config.tenantId, "global", "default");
         if (!policy) throw new Error("No enabled global/default autonomy policy exists; Tracey fails closed");
         return this.autonomy.evaluatePlan({

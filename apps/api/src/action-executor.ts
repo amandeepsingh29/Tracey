@@ -45,6 +45,7 @@ export class ApprovedActionExecutor {
     allowedNamespaces?: string[];
     allowedWorkloads?: string[];
     observability?: Pick<SigNozAdapter, "getServiceHealthSnapshot">;
+    verificationPollIntervalMs?: number;
   }) {
     if (config.kubernetesEnabled) {
       this.kubernetes = new KubernetesAdapter({
@@ -234,12 +235,7 @@ export class ApprovedActionExecutor {
     if (!baseline) return { verified: false, workloadReady, rollout, reason: "Pre-action SigNoz snapshot is missing" };
     const end = Date.now();
     const start = Math.min(baseline.window.end, end - 1);
-    const current = await this.config.observability.getServiceHealthSnapshot({
-      serviceName: plan.verification.serviceName,
-      start,
-      end,
-    });
-    const comparison = compareServiceHealth(baseline, current, plan.verification);
+    const { current, comparison } = await this.pollPostActionHealth(plan, baseline, start, deadline);
     return {
       verified: workloadReady && comparison.verified,
       workloadReady,
@@ -273,13 +269,12 @@ export class ApprovedActionExecutor {
     if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));
     const baseline = preSnapshot.observability as ServiceHealthSnapshot | undefined;
     if (!baseline) return { verified: false, workloadReady, rollout, reason: "Pre-action SigNoz snapshot is missing during recovery" };
-    const end = Date.now();
-    const current = await this.config.observability.getServiceHealthSnapshot({
-      serviceName: plan.verification.serviceName,
-      start: Math.min(recoveryStartedAt, end - 1),
-      end,
-    });
-    const comparison = compareServiceHealth(baseline, current, plan.verification);
+    const { current, comparison } = await this.pollPostActionHealth(
+      plan,
+      baseline,
+      Math.min(recoveryStartedAt, Date.now() - 1),
+      deadline,
+    );
     return {
       verified: workloadReady && comparison.verified,
       workloadReady,
@@ -292,6 +287,42 @@ export class ApprovedActionExecutor {
   private assertUsableObservability(snapshot: ServiceHealthSnapshot, minimum: number, phase: string): void {
     const problems = this.observabilityProblems(snapshot, minimum, phase);
     if (problems.length > 0) throw new Error(problems.join("; "));
+  }
+
+  private async pollPostActionHealth(
+    plan: RemediationPlan,
+    baseline: ServiceHealthSnapshot,
+    start: number,
+    deadline: number,
+  ): Promise<{
+    current: ServiceHealthSnapshot;
+    comparison: ReturnType<typeof compareServiceHealth>;
+  }> {
+    if (!this.config.observability) throw new Error("SigNoz verification is not configured");
+    const pollIntervalMs = Math.max(0, this.config.verificationPollIntervalMs ?? 5_000);
+    let lastError: unknown;
+    while (true) {
+      const end = Date.now();
+      try {
+        const current = await this.config.observability.getServiceHealthSnapshot({
+          serviceName: plan.verification.serviceName,
+          start: Math.min(start, end - 1),
+          end,
+        });
+        const comparison = compareServiceHealth(baseline, current, plan.verification);
+        const waitingForSamples = current.totalSpans < plan.verification.minimumSampleCount;
+        if (!waitingForSamples || Date.now() >= deadline) return { current, comparison };
+      } catch (error) {
+        lastError = error;
+        if (Date.now() >= deadline) throw error;
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        if (lastError) throw lastError;
+        throw new Error("SigNoz verification timed out before enough post-action samples arrived");
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
+    }
   }
 
   private observabilityProblems(snapshot: ServiceHealthSnapshot, minimum: number, phase: string): string[] {
