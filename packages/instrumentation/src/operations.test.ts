@@ -20,6 +20,7 @@ describe("custom-agent instrumentation", () => {
         toolName: "customer.lookup",
         transport: "http",
         sideEffect: "read",
+        content: { input: "{\"customer\":\"opaque\"}", output: "{\"found\":true}" },
       },
       async () => ({ customerId: "opaque-id" }),
     );
@@ -30,10 +31,17 @@ describe("custom-agent instrumentation", () => {
     assert.equal(finished.length, 1);
     assert.equal(finished[0]?.name, "execute_tool customer.lookup");
     assert.equal(finished[0]?.attributes["tracey.tool.result.class"], "success");
+    assert.equal(finished[0]?.attributes["tracey.content.input"], "{\"customer\":\"opaque\"}");
+    assert.equal(finished[0]?.attributes["tracey.content.output"], "{\"found\":true}");
     assert.equal(finished[0]?.attributes["gen_ai.tool.call.arguments"], undefined);
 
     const modelValue = await instrumentModelCall(
-      { providerName: "openai", requestModel: "gpt-5-mini", operationName: "chat" },
+      {
+        providerName: "openai",
+        requestModel: "gpt-5-mini",
+        operationName: "chat",
+        content: { input: "model input", output: "real-provider-output" },
+      },
       async () => ({
         value: "real-provider-output",
         telemetry: {
@@ -53,6 +61,7 @@ describe("custom-agent instrumentation", () => {
     assert.equal(modelSpan?.attributes["tracey.cost.nano_usd"], 560_000);
     assert.equal(modelSpan?.attributes["tracey.cost.usd"], 0.00056);
     assert.equal(modelSpan?.attributes["gen_ai.usage.cached_input_tokens"], 400);
+    assert.equal(modelSpan?.attributes["tracey.content.output"], "real-provider-output");
     await provider.shutdown();
   });
 });

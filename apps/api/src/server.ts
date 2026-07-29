@@ -36,7 +36,26 @@ import { ConnectorSecretVault } from "./connector-secrets.js";
 import { agentRunsToExecutions, codexLogsToExecutions, type ObservedExecution } from "./execution-feed.js";
 import { listRecentCodexForensicTurns, readCodexForensicTurn } from "./codex-forensic-reader.js";
 import { buildCodexExecutionGraph, buildLocalCodexExecutionGraph } from "./execution-graph.js";
+import { AgentSetupRequestSchema, generateAgentSetup } from "./agent-setup.js";
 import { KubernetesAdapter } from "@tracey/cloud-adapter";
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  operation: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await operation(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 export function buildServer(config: AppConfig) {
   const server = Fastify({
@@ -930,6 +949,25 @@ export function buildServer(config: AppConfig) {
     }
   });
 
+  server.post("/v1/agents/setup", { preHandler: adminAuth }, async (request, reply) => {
+    const parsed = AgentSetupRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "Invalid agent setup request", issues: parsed.error.issues });
+    }
+    const source = (await agentOnboardingSources()).find(({ sourceId }) => sourceId === parsed.data.sourceId);
+    if (!source) {
+      return reply.code(409).send({ error: "The selected agent producer connector is not enabled" });
+    }
+    if (!source.setupLanguages?.includes(parsed.data.language)) {
+      return reply.code(400).send({ error: "The selected producer does not support generated setup for this language" });
+    }
+    return generateAgentSetup(parsed.data, {
+      otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+      tenantId: config.TRACEY_TENANT_ID,
+      contractVersion: source.telemetryContractVersion,
+    });
+  });
+
   server.get("/v1/agents", { preHandler: apiAuth }, async (request, reply) => {
     if (!store) {
       return reply.code(503).send({
@@ -1050,6 +1088,8 @@ export function buildServer(config: AppConfig) {
     }).refine(({ start, end }) => start < end && end - start <= 7 * 86_400_000, "time range must be between one millisecond and seven days").safeParse(query);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid execution feed query", issues: parsed.error.issues });
 
+    const onboarding = await agentOnboardingSources();
+    const producerDisplayNames = new Map(onboarding.map(({ producerType, displayName }) => [producerType, displayName]));
     const registered = (await listConnectedAgents(100)).filter(({ status }) => status === "active");
     type SourceResult = {
       source: {
@@ -1057,21 +1097,25 @@ export function buildServer(config: AppConfig) {
         displayName: string;
         serviceName?: string;
         producerType: string;
+        producerDisplayName?: string;
         status: "complete" | "empty" | "unavailable" | "not_registered";
         observedExecutions: number;
         limitation?: string;
       };
       executions: ObservedExecution[];
     };
-    const agentTasks = registered.map(async (agent): Promise<SourceResult> => {
+    const results = await mapWithConcurrency(registered, 4, async (agent): Promise<SourceResult> => {
         const sourceId = `agent:${agent.agentId}`;
+        const producerDisplayName = producerDisplayNames.get(agent.producerType);
+        const producerLabel = producerDisplayName ? { producerDisplayName } : {};
         if (agent.environment !== config.DEPLOYMENT_ENVIRONMENT) {
           return {
             source: {
               sourceId,
               displayName: agent.displayName,
               serviceName: agent.serviceName,
-            producerType: agent.producerType,
+              producerType: agent.producerType,
+              ...producerLabel,
               status: "unavailable",
               observedExecutions: 0,
               limitation: "The registered environment is outside the configured SigNoz scope.",
@@ -1088,6 +1132,7 @@ export function buildServer(config: AppConfig) {
                   displayName: agent.displayName,
                   serviceName: agent.serviceName,
                   producerType: agent.producerType,
+                  ...producerLabel,
                   status: "unavailable",
                   observedExecutions: 0,
                   limitation: "This registered Codex producer does not use a supported telemetry service identity.",
@@ -1115,6 +1160,7 @@ export function buildServer(config: AppConfig) {
                 displayName: agent.displayName,
                 serviceName: agent.serviceName,
                 producerType: agent.producerType,
+                ...producerLabel,
                 status: executions.length > 0 ? "complete" : "empty",
                 observedExecutions: executions.length,
               },
@@ -1125,9 +1171,33 @@ export function buildServer(config: AppConfig) {
             start: parsed.data.start,
             end: parsed.data.end,
             serviceName: agent.serviceName,
-            limit: parsed.data.limit,
+            limit: Math.min(parsed.data.limit, 200),
             offset: 0,
           }, agent.producerType);
+          if (result.runs.length === 0) {
+            return {
+              source: {
+                sourceId,
+                displayName: agent.displayName,
+                serviceName: agent.serviceName,
+                producerType: agent.producerType,
+                ...producerLabel,
+                status: "empty",
+                observedExecutions: 0,
+              },
+              executions: [],
+            };
+          }
+          const detail = await investigations!.getServiceSpans({
+            serviceName: agent.serviceName,
+            start: parsed.data.start,
+            end: parsed.data.end,
+            limit: 10_000,
+          });
+          const spansByTraceId = new Map<string, typeof detail.spans>();
+          for (const span of detail.spans) {
+            spansByTraceId.set(span.traceId, [...(spansByTraceId.get(span.traceId) ?? []), span]);
+          }
           const executions = agentRunsToExecutions({
             sourceId,
             runs: result.runs,
@@ -1135,6 +1205,8 @@ export function buildServer(config: AppConfig) {
             producerName: agent.displayName,
             serviceName: agent.serviceName,
             environment: agent.environment,
+            spansByTraceId,
+            contractVersion: agent.telemetryContractVersion,
           });
           return {
             source: {
@@ -1142,6 +1214,7 @@ export function buildServer(config: AppConfig) {
               displayName: agent.displayName,
               serviceName: agent.serviceName,
               producerType: agent.producerType,
+              ...producerLabel,
               status: executions.length > 0 ? "complete" : "empty",
               observedExecutions: executions.length,
             },
@@ -1154,6 +1227,7 @@ export function buildServer(config: AppConfig) {
               displayName: agent.displayName,
               serviceName: agent.serviceName,
               producerType: agent.producerType,
+              ...producerLabel,
               status: "unavailable",
               observedExecutions: 0,
               limitation: "The bounded SigNoz run query for this registered agent failed.",
@@ -1162,7 +1236,6 @@ export function buildServer(config: AppConfig) {
           };
         }
       });
-    const results = await Promise.all(agentTasks);
     const sourceStatuses = results.map(({ source }) => source);
     const executions = results.flatMap(({ executions: items }) => items)
       .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))

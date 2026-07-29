@@ -81,9 +81,9 @@ Acceptance criteria:
 - [x] Verify registration and telemetry observation as separate states.
 - [x] Make generic OpenTelemetry the default onboarding source when telemetry is
       ready.
-- [ ] Add a copyable OpenTelemetry setup generated from the selected agent
+- [x] Add a copyable OpenTelemetry setup generated from the selected agent
       language/framework.
-- [ ] Test Python, Node.js, and one framework-neutral OTLP producer end to end.
+- [x] Test Python, Node.js, and one framework-neutral OTLP producer end to end.
 - [ ] Publish `@tracey/instrumentation` only after its telemetry contract passes
       live compatibility verification.
 
@@ -96,15 +96,16 @@ Acceptance criteria:
 
 ### 3. Make execution observability complete
 
-- [ ] Define and version the minimum execution telemetry contract.
-- [ ] Display contract completeness per agent and per execution.
-- [ ] Preserve prompt, response, model, retrieval, tool, result, error, token,
+- [x] Define and version the minimum execution telemetry contract.
+- [x] Display contract completeness per execution.
+- [x] Preserve prompt, response, model, retrieval, tool, result, error, token,
       latency, and cost fields when emitted.
-- [ ] Clearly distinguish absent producer data from query failures.
-- [ ] Add live refresh or bounded polling to the Runs feed.
-- [ ] Verify pagination and stable ordering with high execution volume.
-- [ ] Add saved filters and shareable execution URLs.
-- [ ] Ensure every execution row routes to the correct source-specific detail
+- [x] Clearly distinguish absent producer data from query failures.
+- [x] Add live refresh or bounded polling to the Runs feed.
+- [x] Add bounded pagination with deterministic execution ordering.
+- [ ] Load-test pagination and ordering with production-scale execution volume.
+- [x] Add saved filters and shareable execution URLs.
+- [x] Ensure every execution row routes to the correct source-specific detail
       resolver without source-specific list-page behavior.
 
 Acceptance criteria:
@@ -257,6 +258,7 @@ Update this table only when verification evidence exists.
 
 | Date | Change | Verification |
 | --- | --- | --- |
+| 2026-07-29 | Added generated Python, Node.js, and generic OTLP onboarding plus a versioned nine-field execution contract and production Runs controls | Live no-restart verification observed all three producers at 100% contract coverage; typecheck, API, adapter, instrumentation, web tests, production build, and browser inspection |
 | 2026-07-29 | Agent onboarding now comes from enabled connector capabilities, defaults to generic OpenTelemetry, and keeps registration separate from observed telemetry | Connector, API, and web tests plus live API and browser verification |
 | 2026-07-29 | Runs sources and filters now follow active registered agents; Codex has no dedicated list-page behavior | API tests, web tests, production builds, and live browser inspection |
 | 2026-07-28 | Agent registration can be linked to a discovered Kubernetes Deployment | API tests and live Deployment lookup |

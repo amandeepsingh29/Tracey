@@ -84,6 +84,14 @@ export class InvestigationService {
     return this.signoz.searchAgentRuns(input, producerType);
   }
 
+  getTraceSpans(input: TraceDetailsSearch) {
+    return this.signoz.getTraceSpans(input);
+  }
+
+  getServiceSpans(input: { serviceName: string; start: number; end: number; limit?: number }) {
+    return this.signoz.getServiceSpans(input);
+  }
+
   queryAgentRunMetrics(input: AgentRunMetricsSearch): Promise<AgentRunMetricsResult> {
     return this.signoz.queryAgentRunMetrics(input);
   }

@@ -23,6 +23,7 @@
     "verify:cohort": "node scripts/verify-cohort.mjs",
     "verify:codex": "node scripts/verify-codex.mjs",
     "verify:frontend": "node scripts/verify-frontend-e2e.mjs",
+    "verify:agent-onboarding": "node scripts/verify-agent-onboarding.mjs",
     "eval:capture": "node scripts/capture-evaluation.mjs",
     "eval:report": "pnpm --filter @tracey/evaluation build && node scripts/evaluate-dataset.mjs"
   },

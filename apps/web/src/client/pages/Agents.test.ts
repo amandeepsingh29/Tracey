@@ -47,6 +47,7 @@ describe("agent-agnostic onboarding", () => {
         status: "observed",
         startedAt: "2026-07-28T00:00:00.000Z",
         tools: [],
+        contract: { version: "1.0.0", fields: { prompt: false, response: false, model: false, retrieval: false, tools: false, errors: false, tokens: false, cost: false, latency: false }, observedFields: 0, totalFields: 9, completeness: 0 },
         eventCount: 1,
       }],
       sources: [{

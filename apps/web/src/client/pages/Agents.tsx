@@ -9,7 +9,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Button, EmptyState, ErrorState, Field, LoadingState, MetricCard, Modal, PageHeader, Panel, StatusChip } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { duration, relativeTime, titleCase } from "../lib/format";
-import type { Agent, AgentDeployment, AgentOnboardingSource, ExecutionSource } from "../types";
+import type { Agent, AgentDeployment, AgentOnboardingSource, AgentSetupLanguage, ExecutionSource, GeneratedAgentSetup } from "../types";
 
 export function connectedAgents(agents: Agent[], sources: AgentOnboardingSource[]) {
   const connectedTypes = new Set(sources.map(({ producerType }) => producerType));
@@ -68,6 +68,12 @@ function AgentCard({ agent, source, producerName }: { agent: Agent; source: Exec
 }
 
 type ConnectionStep = "source" | "setup" | "identity" | "verify";
+const connectionSteps: ConnectionStep[] = ["source", "identity", "setup", "verify"];
+const setupLanguageNames: Record<AgentSetupLanguage, string> = {
+  python: "Python",
+  node: "Node.js",
+  otlp: "Generic OTLP",
+};
 
 export async function verifyRegisteredAgent(agent: Agent): Promise<{ observed: boolean; count: number; limitation?: string }> {
   const end = Date.now();
@@ -84,7 +90,9 @@ function ConnectAgentModal({ open, onClose }: { open: boolean; onClose: () => vo
   const connectors = useQuery({ queryKey: ["connectors"], queryFn: api.connectors, enabled: open });
   const [step, setStep] = useState<ConnectionStep>("source");
   const [sourceId, setSourceId] = useState("");
+  const [language, setLanguage] = useState<AgentSetupLanguage>("python");
   const [registered, setRegistered] = useState<Agent>();
+  const [generatedSetup, setGeneratedSetup] = useState<GeneratedAgentSetup>();
   const [verification, setVerification] = useState<{ observed: boolean; count: number; limitation?: string }>();
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string>();
@@ -94,16 +102,19 @@ function ConnectAgentModal({ open, onClose }: { open: boolean; onClose: () => vo
   useEffect(() => {
     if (open && defaultSource && !sources.some((source) => source.sourceId === sourceId)) setSourceId(defaultSource.sourceId);
   }, [defaultSource, open, sourceId, sources]);
-  const reset = () => { setStep("source"); setSourceId(""); setRegistered(undefined); setVerification(undefined); setError(undefined); setCopied(false); };
+  const reset = () => { setStep("source"); setSourceId(""); setLanguage("python"); setRegistered(undefined); setGeneratedSetup(undefined); setVerification(undefined); setError(undefined); setCopied(false); };
   const close = () => { reset(); onClose(); };
   const registration = useMutation({
     mutationFn: api.createAgent,
-    onSuccess: async (agent) => {
+    onSuccess: async (agent, variables) => {
       setRegistered(agent);
-      setStep("verify");
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
       try {
-        setVerification(await verifyRegisteredAgent(agent));
+        if (setup?.setupLanguages?.length) {
+          const generated = await api.agentSetup({ ...variables, language });
+          setGeneratedSetup(generated);
+        }
+        setStep("setup");
       } catch (failure) {
         setError(failure instanceof Error ? failure.message : "Tracey could not query the connected evidence source.");
       }
@@ -124,26 +135,39 @@ function ConnectAgentModal({ open, onClose }: { open: boolean; onClose: () => vo
   const copyConfiguration = async () => {
     try {
       if (!setup) return;
-      await navigator.clipboard.writeText(setup.configurationTemplate);
+      const text = generatedSetup
+        ? [
+            ...generatedSetup.installCommands,
+            "",
+            "# Environment",
+            generatedSetup.environment,
+            "",
+            "# Agent code",
+            generatedSetup.code,
+            "",
+            `# Run: ${generatedSetup.runCommand}`,
+          ].join("\n")
+        : setup.configurationTemplate;
+      await navigator.clipboard.writeText(text);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1_500);
     } catch {
       setError("The browser could not copy this configuration. Select the text and copy it manually.");
     }
   };
-  const titles: Record<ConnectionStep, string> = { source: "Connect an agent", setup: `Set up ${setup?.displayName ?? "agent"}`, identity: "Confirm telemetry identity", verify: "Verify first execution" };
+  const titles: Record<ConnectionStep, string> = { source: "Connect an agent", setup: `Run ${generatedSetup?.languageName ?? setup?.displayName ?? "agent"} setup`, identity: "Choose language and identity", verify: "Verify first execution" };
   const descriptions: Record<ConnectionStep, string> = {
     source: "Choose where the agent runs. Tracey will show only the instructions and fields required for that source.",
-    setup: "Configure the real producer, restart it if required, and generate one normal execution.",
-    identity: "These values must match the telemetry exported by the agent. Tracey does not store the agent’s model credentials.",
+    setup: "Copy the generated setup, run one real agent request, then verify it without restarting Tracey.",
+    identity: "Tracey generates setup from this workspace’s collector and these exact telemetry values.",
     verify: "Tracey queries the connected evidence source now. Registration alone is not treated as a successful connection.",
   };
 
   return <Modal open={open} onClose={close} title={titles[step]} description={descriptions[step]}>
-    <div className="connection-progress" aria-label="Connection progress">{(["source", "setup", "identity", "verify"] as ConnectionStep[]).map((item, index) => <span key={item} className={item === step ? "active" : index < ["source", "setup", "identity", "verify"].indexOf(step) ? "complete" : ""}>{index + 1}</span>)}</div>
-    {step === "source" && <div className="connection-body">{connectors.isLoading ? <LoadingState label="Loading enabled agent connectors" /> : connectors.error ? <ErrorState error={connectors.error} onRetry={() => void connectors.refetch()} /> : sources.length === 0 ? <EmptyState icon={Cable} title="No agent producer connected" description="Enable an agent producer connector before registering an agent." action={<Button onClick={() => { close(); router.push("/connectors"); }}>Manage connectors</Button>} /> : <><div className="producer-choice-grid">{sources.map((item) => <button type="button" key={item.sourceId} className={setup?.sourceId === item.sourceId ? "active" : ""} onClick={() => setSourceId(item.sourceId)}><Bot /><div><strong>{item.displayName}</strong><p>{item.description}</p></div>{setup?.sourceId === item.sourceId && <CheckCircle2 />}</button>)}</div><footer className="modal-actions"><Button variant="secondary" onClick={close}>Cancel</Button><Button disabled={!setup} onClick={() => setStep("setup")}>Continue<ArrowRight size={15} /></Button></footer></>}</div>}
-    {step === "setup" && setup && <div className="connection-body"><ol className="setup-checklist">{setup.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}</ol><div className="configuration-block"><header><span>Configuration</span><button type="button" onClick={() => void copyConfiguration()}>{copied ? <CheckCircle2 /> : <Copy />}{copied ? "Copied" : "Copy"}</button></header><pre>{setup.configurationTemplate}</pre></div><p className="connection-note">Registration stores the expected identity only. Tracey will not mark this agent observed until matching telemetry is returned.</p><footer className="modal-actions"><Button variant="secondary" onClick={() => setStep("source")}>Back</Button><Button onClick={() => setStep("identity")}>I configured it<ArrowRight size={15} /></Button></footer></div>}
-    {step === "identity" && setup && <form className="form-stack connection-form" onSubmit={submit}><div className="form-grid"><Field label="Display name" hint="A readable name shown inside Tracey"><input name="displayName" required maxLength={128} defaultValue={setup.displayNameSuggestion} placeholder="Support triage agent" /></Field><Field label="Service name" hint="Must exactly match OpenTelemetry service.name"><input name="serviceName" required pattern="[A-Za-z0-9_.\-/]+" defaultValue={setup.serviceNameSuggestion} placeholder="support-agent-api" /></Field><Field label="Environment" hint="Must match Tracey’s configured telemetry scope"><input name="environment" required defaultValue="development" /></Field><Field label="Telemetry contract"><input value={`${setup.normalizationProfile} · ${setup.telemetryContractVersion}`} readOnly /></Field></div>{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button type="button" variant="secondary" onClick={() => setStep("setup")}>Back</Button><Button disabled={registration.isPending}>{registration.isPending ? "Registering…" : "Register identity"}<ArrowRight size={15} /></Button></footer></form>}
+    <div className="connection-progress" aria-label="Connection progress">{connectionSteps.map((item, index) => <span key={item} className={item === step ? "active" : index < connectionSteps.indexOf(step) ? "complete" : ""}>{index + 1}</span>)}</div>
+    {step === "source" && <div className="connection-body">{connectors.isLoading ? <LoadingState label="Loading enabled agent connectors" /> : connectors.error ? <ErrorState error={connectors.error} onRetry={() => void connectors.refetch()} /> : sources.length === 0 ? <EmptyState icon={Cable} title="No agent producer connected" description="Enable an agent producer connector before registering an agent." action={<Button onClick={() => { close(); router.push("/connectors"); }}>Manage connectors</Button>} /> : <><div className="producer-choice-grid">{sources.map((item) => <button type="button" key={item.sourceId} className={setup?.sourceId === item.sourceId ? "active" : ""} onClick={() => setSourceId(item.sourceId)}><Bot /><div><strong>{item.displayName}</strong><p>{item.description}</p></div>{setup?.sourceId === item.sourceId && <CheckCircle2 />}</button>)}</div><footer className="modal-actions"><Button variant="secondary" onClick={close}>Cancel</Button><Button disabled={!setup} onClick={() => setStep("identity")}>Continue<ArrowRight size={15} /></Button></footer></>}</div>}
+    {step === "identity" && setup && <form className="form-stack connection-form" onSubmit={submit}>{setup.setupLanguages?.length ? <Field label="Language or integration" hint="Choose how this agent will emit OpenTelemetry"><div className="producer-choice-grid language-choice-grid">{setup.setupLanguages.map((value) => <button type="button" key={value} className={language === value ? "active" : ""} onClick={() => setLanguage(value)}><Braces /><div><strong>{setupLanguageNames[value]}</strong><p>{value === "otlp" ? "Send the contract directly over OTLP/HTTP" : `Use the ${setupLanguageNames[value]} OpenTelemetry SDK`}</p></div>{language === value && <CheckCircle2 />}</button>)}</div></Field> : null}<div className="form-grid"><Field label="Display name" hint="A readable name shown inside Tracey"><input name="displayName" required maxLength={128} defaultValue={setup.displayNameSuggestion} placeholder="Support triage agent" /></Field><Field label="Service name" hint="Must exactly match OpenTelemetry service.name"><input name="serviceName" required pattern="[A-Za-z0-9_.\-/]+" defaultValue={setup.serviceNameSuggestion} placeholder="support-agent-api" /></Field><Field label="Environment" hint="Must match Tracey’s configured telemetry scope"><input name="environment" required defaultValue="development" /></Field><Field label="Telemetry contract"><input value={`${setup.normalizationProfile} · ${setup.telemetryContractVersion}`} readOnly /></Field></div>{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button type="button" variant="secondary" onClick={() => setStep("source")}>Back</Button><Button disabled={registration.isPending}>{registration.isPending ? "Generating setup…" : "Generate setup"}<ArrowRight size={15} /></Button></footer></form>}
+    {step === "setup" && setup && <div className="connection-body"><ol className="setup-checklist">{setup.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}</ol>{generatedSetup ? <><div className="configuration-block"><header><span>Install</span></header><pre>{generatedSetup.installCommands.length ? generatedSetup.installCommands.join("\n") : "No SDK installation required."}</pre></div><div className="configuration-block"><header><span>Environment from this Tracey workspace</span></header><pre>{generatedSetup.environment}</pre></div><div className="configuration-block"><header><span>{generatedSetup.languageName} setup</span><button type="button" onClick={() => void copyConfiguration()}>{copied ? <CheckCircle2 /> : <Copy />}{copied ? "Copied all" : "Copy all"}</button></header><pre>{generatedSetup.code}</pre></div><p className="connection-note">Expected spans: {generatedSetup.expectedSpans.join(" → ")}. Run with <code>{generatedSetup.runCommand}</code>.</p></> : <div className="configuration-block"><header><span>Configuration</span><button type="button" onClick={() => void copyConfiguration()}>{copied ? <CheckCircle2 /> : <Copy />}{copied ? "Copied" : "Copy"}</button></header><pre>{setup.configurationTemplate}</pre></div>}<p className="connection-note">The identity is registered, but it remains “Registered” until matching telemetry is observed.</p>{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button variant="secondary" onClick={() => setStep("identity")}>Back</Button><Button onClick={() => { setStep("verify"); if (registered) verify.mutate(registered); }}>I ran the agent<ArrowRight size={15} /></Button></footer></div>}
     {step === "verify" && registered && <div className="connection-body verification-step"><div className="registered-identity"><CheckCircle2 /><div><strong>Identity registered</strong><code>{registered.serviceName}</code><p>Telemetry verification is still separate.</p></div></div>{verification?.observed ? <div className="verification-success"><CheckCircle2 /><div><strong>Execution observed</strong><p>Tracey found {verification.count} matching execution{verification.count === 1 ? "" : "s"} in the last seven days.</p></div></div> : verification ? <div className="verification-waiting"><RefreshCw /><div><strong>Registered, waiting for telemetry</strong><p>{verification.limitation ?? `No execution matching ${registered.serviceName} has arrived yet. Run the agent once, wait a few seconds, then retry.`}</p></div></div> : <div className="verification-waiting"><Activity /><div><strong>Ready to query live evidence</strong><p>Run one normal agent request first if you have not already.</p></div></div>}{error && <p className="form-error" role="alert">{error}</p>}<footer className="modal-actions"><Button variant="secondary" onClick={() => verify.mutate(registered)} disabled={verify.isPending}>{verify.isPending ? "Checking evidence…" : verification ? "Check again" : "Verify execution"}</Button><Button onClick={() => { close(); router.push(`/agents/${registered.agentId}?linkDeployment=true`); }}><Link2 size={15} />Link deployment</Button><Button variant="ghost" onClick={() => { close(); router.push(verification?.observed ? `/runs?source=${encodeURIComponent(`agent:${registered.agentId}`)}` : `/agents/${registered.agentId}`); }}>{verification?.observed ? "View executions" : "Finish later"}</Button></footer></div>}
   </Modal>;
 }

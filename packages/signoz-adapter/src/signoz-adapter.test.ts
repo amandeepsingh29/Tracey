@@ -15,6 +15,7 @@ import {
   buildCodexRecentLogsQuery,
   buildCohortSpansQuery,
   buildSigNozMetricAttributes,
+  buildServiceSpansQuery,
   buildServiceHealthQuery,
   buildTraceLogsQuery,
   buildTraceSpansQuery,
@@ -215,6 +216,36 @@ describe("multi-signal query contracts", () => {
       assert.match(expression, /tracey\.tenant\.id = 'tenant-a'/);
       assert.match(expression, /deployment\.environment\.name = 'test'/);
     }
+  });
+
+  it("queries all spans for one registered service with the configured scope", () => {
+    const query = buildServiceSpansQuery({
+      serviceName: "notes-agent-api",
+      start: traceSearch.start,
+      end: traceSearch.end,
+      limit: 500,
+    }, scope) as {
+      compositeQuery: { queries: Array<{ spec: {
+        signal: string;
+        limit: number;
+        filter: { expression: string };
+        selectFields: Array<{ name: string }>;
+      } }> };
+    };
+    const spec = query.compositeQuery.queries[0]?.spec;
+
+    assert.equal(spec?.signal, "traces");
+    assert.equal(spec?.limit, 500);
+    assert.equal(
+      spec?.filter.expression,
+      "service.name = 'notes-agent-api' AND tracey.tenant.id = 'tenant-a' AND deployment.environment.name = 'test'",
+    );
+    const fields = spec?.selectFields.map(({ name }) => name) ?? [];
+    assert.ok(fields.includes("trace_id"));
+    assert.ok(fields.includes("tracey.content.input"));
+    assert.ok(fields.includes("tracey.content.output"));
+    assert.ok(fields.includes("gen_ai.usage.input_tokens"));
+    assert.ok(fields.includes("tracey.cost.usd"));
   });
 
   it("builds cohort queries from enumerated dimensions with fixed scope", () => {

@@ -1,0 +1,12 @@
+{
+  "name": "@tracey/example-node-agent",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tracey/instrumentation": "workspace:*",
+    "@tracey/telemetry": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3"
+  }
+}

@@ -30,6 +30,12 @@ export interface AgentRunOptions {
   sessionId?: string;
   workflowName?: string;
   workflowVersion?: string;
+  content?: CapturedContent;
+}
+
+export interface CapturedContent {
+  input?: string;
+  output?: string;
 }
 
 export interface InstrumentedAgentResult<T> {
@@ -46,6 +52,7 @@ export interface ModelCallOptions {
   operationName?: "chat" | "text_completion" | "generate_content" | "embeddings";
   route?: string;
   openaiApiType?: "responses" | "chat_completions";
+  content?: CapturedContent;
 }
 
 export interface ModelCallTelemetry {
@@ -90,6 +97,7 @@ export interface ToolCallOptions<T> {
   timeoutMs?: number;
   classifyResult?: (result: T) => ToolResultClass;
   classifyError?: (error: unknown) => Exclude<ToolResultClass, "success">;
+  content?: CapturedContent;
 }
 
 export interface RetrievalOptions {
@@ -161,7 +169,9 @@ export async function withAgentRun<T>(
         "tracey.workflow.name": options.workflowName,
         "tracey.workflow.version": options.workflowVersion,
         "tracey.input.hash": options.inputHash,
-        "tracey.content.capture": "none",
+        "tracey.content.capture": options.content ? "full" : "none",
+        "tracey.content.input": options.content?.input,
+        "tracey.content.output": options.content?.output,
       }),
     },
     async (span) => {
@@ -229,7 +239,9 @@ export async function instrumentModelCall<T>(
         "tracey.prompt.version": options.promptVersion,
         "openai.api.type": options.openaiApiType,
         "tracey.model.route": options.route,
-        "tracey.content.capture": "none",
+        "tracey.content.capture": options.content ? "full" : "none",
+        "tracey.content.input": options.content?.input,
+        "tracey.content.output": options.content?.output,
       }),
     },
     async (span) => {
@@ -362,7 +374,9 @@ export async function instrumentToolCall<T>(
         "tracey.tool.side_effect": options.sideEffect,
         "tracey.tool.attempt": options.attempt,
         "tracey.tool.timeout_ms": options.timeoutMs,
-        "tracey.content.capture": "none",
+        "tracey.content.capture": options.content ? "full" : "none",
+        "tracey.content.input": options.content?.input,
+        "tracey.content.output": options.content?.output,
       }),
     },
     async (span) => {

@@ -117,6 +117,33 @@ describe("integration configuration gates", () => {
     assert.equal(response.json().connectors.find(({ id }: { id: string }) => id === "claude-code").state, "needs_configuration");
   });
 
+  it("generates language setup from the configured Tracey collector and requested identity", async () => {
+    const server = buildServer({
+      ...config,
+      SIGNOZ_API_URL: "http://127.0.0.1:9",
+      SIGNOZ_API_KEY: "catalog-only-key",
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.internal:4318",
+    });
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/agents/setup",
+      headers: apiHeaders,
+      payload: {
+        sourceId: "generic-otel",
+        language: "node",
+        displayName: "Support Agent",
+        serviceName: "support-agent-api",
+        environment: "development",
+      },
+    });
+    await server.close();
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().endpoint, "http://collector.internal:4318");
+    assert.match(response.json().environment, /OTEL_SERVICE_NAME=support-agent-api/);
+    assert.match(response.json().code, /agent\.run/);
+  });
+
   it("keeps product data contracts authenticated and refuses fabricated incident data", async () => {
     const server = buildServer(config);
     const unauthenticated = await server.inject({ method: "GET", url: "/v1/incidents" });

@@ -17,6 +17,7 @@ const feed: ExecutionFeed = {
       startedAt: "2026-07-29T00:00:00.000Z",
       model: "openai/gpt-4o-mini",
       tools: ["search_notes"],
+      contract: { version: "1.0.0", fields: { prompt: true, response: true, model: true, retrieval: false, tools: true, errors: true, tokens: true, cost: false, latency: true }, observedFields: 7, totalFields: 9, completeness: 7 / 9 },
       eventCount: 1,
     },
     {
@@ -32,6 +33,7 @@ const feed: ExecutionFeed = {
       startedAt: "2026-07-29T00:01:00.000Z",
       model: "claude-sonnet",
       tools: ["create_ticket"],
+      contract: { version: "1.0.0", fields: { prompt: false, response: false, model: true, retrieval: false, tools: true, errors: true, tokens: false, cost: false, latency: false }, observedFields: 3, totalFields: 9, completeness: 1 / 3 },
       eventCount: 1,
     },
   ],
@@ -41,6 +43,7 @@ const feed: ExecutionFeed = {
       displayName: "Notes Assistant",
       serviceName: "notes-agent-api",
       producerType: "custom_otel",
+      producerDisplayName: "OpenTelemetry agent",
       status: "complete",
       observedExecutions: 1,
     },
@@ -49,6 +52,7 @@ const feed: ExecutionFeed = {
       displayName: "Support Agent",
       serviceName: "support-agent-api",
       producerType: "claude_code",
+      producerDisplayName: "Claude Code",
       status: "complete",
       observedExecutions: 1,
     },
@@ -62,7 +66,10 @@ describe("Runs live filters", () => {
   it("derives every filter option from registered sources and observed executions", () => {
     expect(executionFilterOptions(feed)).toEqual({
       sources: feed.sources,
-      producerTypes: ["claude_code", "custom_otel"],
+      producerTypes: [
+        { value: "claude_code", label: "Claude Code" },
+        { value: "custom_otel", label: "OpenTelemetry agent" },
+      ],
       environments: ["development", "production"],
       statuses: ["failed", "succeeded"],
       models: ["claude-sonnet", "openai/gpt-4o-mini"],

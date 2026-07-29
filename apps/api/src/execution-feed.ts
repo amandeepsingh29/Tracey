@@ -1,4 +1,24 @@
-import type { AgentRunSummary, TraceLog } from "@tracey/domain";
+import type { AgentRunSummary, TraceLog, TraceSpan } from "@tracey/domain";
+
+export const executionContractFields = [
+  "prompt",
+  "response",
+  "model",
+  "retrieval",
+  "tools",
+  "errors",
+  "tokens",
+  "cost",
+  "latency",
+] as const;
+export type ExecutionContractField = typeof executionContractFields[number];
+export type ExecutionContract = {
+  version: string;
+  fields: Record<ExecutionContractField, boolean>;
+  observedFields: number;
+  totalFields: number;
+  completeness: number;
+};
 
 export type ObservedExecution = {
   executionId: string;
@@ -17,6 +37,8 @@ export type ObservedExecution = {
   tools: string[];
   inputTokens?: number;
   outputTokens?: number;
+  costUsd?: number;
+  contract: ExecutionContract;
   eventCount: number;
 };
 
@@ -33,6 +55,24 @@ function numberAttribute(attributes: Record<string, unknown>, key: string): numb
 function usefulTraceId(traceId: string): string | undefined {
   return /^[a-fA-F0-9]{32}$/.test(traceId) && traceId !== "0".repeat(32) ? traceId : undefined;
 }
+
+function executionContract(fields: Record<ExecutionContractField, boolean>, version = "1.0.0"): ExecutionContract {
+  const observedFields = Object.values(fields).filter(Boolean).length;
+  const totalFields = executionContractFields.length;
+  return { version, fields, observedFields, totalFields, completeness: observedFields / totalFields };
+}
+
+const emptyContract = () => executionContract({
+  prompt: false,
+  response: false,
+  model: false,
+  retrieval: false,
+  tools: false,
+  errors: false,
+  tokens: false,
+  cost: false,
+  latency: false,
+});
 
 export function codexLogsToExecutions(input: {
   logs: TraceLog[];
@@ -77,6 +117,14 @@ export function codexLogsToExecutions(input: {
       tools,
       ...(inputTokens > 0 ? { inputTokens } : {}),
       ...(outputTokens > 0 ? { outputTokens } : {}),
+      contract: executionContract({
+        ...emptyContract().fields,
+        model: Boolean(model),
+        tools: tools.length > 0,
+        errors: failed,
+        tokens: inputTokens > 0 || outputTokens > 0,
+        latency: durations.length > 0,
+      }),
       eventCount: ordered.length,
     };
   });
@@ -89,22 +137,59 @@ export function agentRunsToExecutions(input: {
   producerName: string;
   serviceName: string;
   environment: string;
+  spansByTraceId?: Map<string, TraceSpan[]>;
+  contractVersion?: string;
 }): ObservedExecution[] {
-  return input.runs.map((run) => ({
-    executionId: `trace:${run.traceId}`,
-    sourceId: input.sourceId,
-    producerType: input.producerType,
-    producerName: input.producerName,
-    serviceName: input.serviceName,
-    environment: input.environment,
-    runId: run.runId,
-    traceId: run.traceId,
-    status: /^(?:fail(?:ed|ure)?|error)$/i.test(run.outcome ?? "") ? "failed"
-      : /^(?:ok|success|succeeded|complete)$/i.test(run.outcome ?? "") ? "succeeded"
-        : "observed",
-    startedAt: run.startedAt,
-    ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
-    tools: [],
-    eventCount: 1,
-  }));
+  return input.runs.map((run) => {
+    const spans = input.spansByTraceId?.get(run.traceId) ?? [];
+    const attributes = spans.map(({ attributes }) => attributes);
+    const root = spans.find(({ name, parentSpanId }) => name === "agent.run" && !parentSpanId)
+      ?? spans.find(({ name }) => name === "agent.run");
+    const prompt = root && stringAttribute(root.attributes, "tracey.content.input");
+    const response = root && stringAttribute(root.attributes, "tracey.content.output");
+    const model = attributes
+      .map((item) => stringAttribute(item, "gen_ai.response.model") ?? stringAttribute(item, "gen_ai.request.model"))
+      .find(Boolean);
+    const tools = [...new Set(attributes.map((item) => stringAttribute(item, "gen_ai.tool.name")).filter((value): value is string => Boolean(value)))].sort();
+    const inputTokens = attributes.reduce((total, item) => total + (numberAttribute(item, "gen_ai.usage.input_tokens") ?? 0), 0);
+    const outputTokens = attributes.reduce((total, item) => total + (numberAttribute(item, "gen_ai.usage.output_tokens") ?? 0), 0);
+    const costUsd = attributes.reduce((total, item) => total + (numberAttribute(item, "tracey.cost.usd") ?? 0), 0);
+    const hasRetrieval = spans.some(({ name, attributes: item }) =>
+      name.startsWith("retrieval ") || stringAttribute(item, "gen_ai.operation.name") === "retrieval");
+    const hasErrorEvidence = Boolean(run.outcome)
+      || spans.some(({ hasError, statusCode }) => hasError !== undefined || statusCode !== undefined);
+    const fields = {
+      prompt: Boolean(prompt),
+      response: Boolean(response),
+      model: Boolean(model),
+      retrieval: hasRetrieval,
+      tools: tools.length > 0,
+      errors: hasErrorEvidence,
+      tokens: inputTokens > 0 || outputTokens > 0,
+      cost: costUsd > 0,
+      latency: run.durationMs !== undefined || spans.some(({ durationMs }) => durationMs >= 0),
+    };
+    return {
+      executionId: `trace:${run.traceId}`,
+      sourceId: input.sourceId,
+      producerType: input.producerType,
+      producerName: input.producerName,
+      serviceName: input.serviceName,
+      environment: input.environment,
+      runId: run.runId,
+      traceId: run.traceId,
+      status: /^(?:fail(?:ed|ure)?|error)$/i.test(run.outcome ?? "") ? "failed"
+        : /^(?:ok|success|succeeded|complete|resolved)$/i.test(run.outcome ?? "") ? "succeeded"
+          : "observed",
+      startedAt: run.startedAt,
+      ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
+      ...(model ? { model } : {}),
+      tools,
+      ...(inputTokens > 0 ? { inputTokens } : {}),
+      ...(outputTokens > 0 ? { outputTokens } : {}),
+      ...(costUsd > 0 ? { costUsd } : {}),
+      contract: executionContract(fields, input.contractVersion),
+      eventCount: Math.max(1, spans.length),
+    };
+  });
 }

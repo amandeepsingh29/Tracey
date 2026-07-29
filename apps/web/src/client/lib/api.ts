@@ -1,5 +1,5 @@
 import type {
-  ActionEvent, ActionProposal, Agent, AgentConnectionRequest, AgentDeployment, Connector, ConnectorCatalog, Health, InvestigationMessage,
+  ActionEvent, ActionProposal, Agent, AgentConnectionRequest, AgentDeployment, AgentSetupRequest, GeneratedAgentSetup, Connector, ConnectorCatalog, Health, InvestigationMessage,
   InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
   Incident, IncidentEvent, IncidentStatus, ExecutionFeed, KubernetesDeploymentSummary,
   CodexExecutionGraph, RecentCodexConversations,
@@ -37,6 +37,7 @@ export const api = {
   deleteConnector: (connectorId: Connector["id"]) => request<void>(`/v1/connectors/${connectorId}/configuration`, { method: "DELETE" }),
   agents: (limit = 100) => request<{ agents: Agent[] }>(`/v1/agents?${query({ limit })}`),
   createAgent: (input: AgentConnectionRequest) => request<Agent>("/v1/agents", { method: "POST", body: JSON.stringify(input) }),
+  agentSetup: (input: AgentSetupRequest) => request<GeneratedAgentSetup>("/v1/agents/setup", { method: "POST", body: JSON.stringify(input) }),
   kubernetesNamespaces: () => request<{ namespaces: string[] }>("/v1/kubernetes/namespaces"),
   kubernetesDeployments: (namespace: string) => request<{ deployments: KubernetesDeploymentSummary[] }>(`/v1/kubernetes/deployments?${query({ namespace })}`),
   agentDeployment: (agentId: string) => request<AgentDeployment>(`/v1/agents/${agentId}/deployment`),

@@ -40,5 +40,32 @@ describe("unified execution feed", () => {
     assert.equal(executions[0]?.sourceId, "agent:support");
     assert.deepEqual(executions[0]?.tools, []);
     assert.equal(executions[0]?.model, undefined);
+    assert.equal(executions[0]?.contract.fields.latency, true);
+    assert.equal(executions[0]?.contract.fields.model, false);
+  });
+
+  it("reports exact execution contract coverage from observed child spans", () => {
+    const traceId = "c".repeat(32);
+    const spans = [
+      { traceId, spanId: "1".repeat(16), parentSpanId: null, name: "agent.run", serviceName: "support-agent-api", startedAt: "2026-07-25T00:00:00.000Z", startTimeMs: 1, durationMs: 50, statusCode: "STATUS_CODE_OK", hasError: false, attributes: { "tracey.content.input": "prompt", "tracey.content.output": "answer" } },
+      { traceId, spanId: "2".repeat(16), parentSpanId: "1".repeat(16), name: "retrieval docs", serviceName: "support-agent-api", startedAt: "2026-07-25T00:00:00.001Z", startTimeMs: 2, durationMs: 5, attributes: { "gen_ai.operation.name": "retrieval" } },
+      { traceId, spanId: "3".repeat(16), parentSpanId: "1".repeat(16), name: "chat gpt-4o-mini", serviceName: "support-agent-api", startedAt: "2026-07-25T00:00:00.010Z", startTimeMs: 10, durationMs: 20, attributes: { "gen_ai.response.model": "gpt-4o-mini", "gen_ai.usage.input_tokens": 18, "gen_ai.usage.output_tokens": 11, "tracey.cost.usd": 0.0000093 } },
+      { traceId, spanId: "4".repeat(16), parentSpanId: "1".repeat(16), name: "execute_tool list_tickets", serviceName: "support-agent-api", startedAt: "2026-07-25T00:00:00.035Z", startTimeMs: 35, durationMs: 10, attributes: { "gen_ai.tool.name": "list_tickets" } },
+    ];
+    const executions = agentRunsToExecutions({
+      sourceId: "agent:support",
+      producerType: "custom_otel",
+      producerName: "Support agent",
+      serviceName: "support-agent-api",
+      environment: "production",
+      contractVersion: "1.0.0",
+      spansByTraceId: new Map([[traceId, spans]]),
+      runs: [{ traceId, runId: "run-full", serviceName: "support-agent-api", outcome: "resolved", startedAt: "2026-07-25T00:00:00.000Z", durationMs: 50 }],
+    });
+    assert.equal(executions[0]?.contract.completeness, 1);
+    assert.equal(executions[0]?.model, "gpt-4o-mini");
+    assert.deepEqual(executions[0]?.tools, ["list_tickets"]);
+    assert.equal(executions[0]?.inputTokens, 18);
+    assert.equal(executions[0]?.costUsd, 0.0000093);
   });
 });

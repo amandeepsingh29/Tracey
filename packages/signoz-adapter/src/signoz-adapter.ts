@@ -622,6 +622,44 @@ export function buildTraceSpansQuery(input: TraceDetailsSearch, scope: Telemetry
   };
 }
 
+export function buildServiceSpansQuery(
+  input: { serviceName: string; start: number; end: number; limit?: number },
+  scope: TelemetryScope,
+): unknown {
+  const search = z.object({
+    serviceName: z.string().trim().min(1).max(255),
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+    limit: z.number().int().min(1).max(10_000).default(10_000),
+  }).refine(({ start, end }) => start < end && end - start <= 7 * 86_400_000).parse(input);
+  return {
+    start: search.start,
+    end: search.end,
+    requestType: "raw",
+    schemaVersion: "v1",
+    variables: {},
+    compositeQuery: {
+      queries: [{
+        type: "builder_query",
+        spec: {
+          name: "A",
+          signal: "traces",
+          filter: {
+            expression: [
+              `service.name = '${escapeFilterValue(search.serviceName)}'`,
+              ...scopeFilters(scope),
+            ].join(" AND "),
+          },
+          selectFields: traceSelectFields,
+          order: [{ key: { name: "timestamp" }, direction: "desc" }],
+          limit: search.limit,
+          disabled: false,
+        },
+      }],
+    },
+  };
+}
+
 export function buildTraceLogsQuery(input: TraceDetailsSearch, scope: TelemetryScope): unknown {
   const search = TraceDetailsSearchSchema.parse(input);
   return {
@@ -866,7 +904,6 @@ export class SigNozAdapter {
   private readonly serverAddress: string;
   private readonly timeoutMs: number;
   private readonly cohortTimeoutMs: number;
-  private readonly unavailableFields = new Set<string>();
 
   constructor(private readonly config: SigNozAdapterConfig) {
     this.endpoint = `${config.baseUrl.replace(/\/$/, "")}/api/v5/query_range`;
@@ -899,6 +936,22 @@ export class SigNozAdapter {
   async getTraceSpans(input: TraceDetailsSearch): Promise<TraceSpanSearchResult> {
     return this.observe("trace_spans", async () => {
       const response = parseRawResponse(await this.query(buildTraceSpansQuery(input, this.config.scope)));
+      const { rows, nextCursor } = rowsFrom(response);
+      const spans = rows.map(normalizeSpan).filter((span): span is TraceSpan => span !== undefined);
+      return {
+        spans,
+        rejectedRows: rows.length - spans.length,
+        query: queryMetadata(response),
+        ...(nextCursor ? { nextCursor } : {}),
+      };
+    });
+  }
+
+  async getServiceSpans(
+    input: { serviceName: string; start: number; end: number; limit?: number },
+  ): Promise<TraceSpanSearchResult> {
+    return this.observe("trace_spans", async () => {
+      const response = parseRawResponse(await this.query(buildServiceSpansQuery(input, this.config.scope)));
       const { rows, nextCursor } = rowsFrom(response);
       const spans = rows.map(normalizeSpan).filter((span): span is TraceSpan => span !== undefined);
       return {
@@ -1138,9 +1191,6 @@ export class SigNozAdapter {
     };
     propagation.inject(context.active(), headers);
     let activePayload = payload;
-    for (const field of this.unavailableFields) {
-      activePayload = withoutSelectedField(activePayload, field) ?? activePayload;
-    }
 
     for (let attempt = 0; attempt <= traceSelectFields.length; attempt += 1) {
       let response: Response;
@@ -1169,7 +1219,6 @@ export class SigNozAdapter {
         const missingField = response.status === 400 ? missingSelectedField(text) : undefined;
         const reducedPayload = missingField ? withoutSelectedField(activePayload, missingField) : undefined;
         if (missingField && reducedPayload) {
-          this.unavailableFields.add(missingField);
           activePayload = reducedPayload;
           continue;
         }

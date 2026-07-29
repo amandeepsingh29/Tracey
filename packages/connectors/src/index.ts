@@ -14,6 +14,7 @@ export const ConnectorStateSchema = z.enum(["ready", "needs_configuration", "dis
 export type ConnectorState = z.infer<typeof ConnectorStateSchema>;
 
 export type AgentProducerType = "codex_desktop" | "codex_cli" | "claude_code" | "custom_otel";
+export type AgentSetupLanguage = "python" | "node" | "otlp";
 
 export interface AgentOnboardingSource {
   sourceId: string;
@@ -27,6 +28,7 @@ export interface AgentOnboardingSource {
   telemetryContractVersion: string;
   instructions: string[];
   configurationTemplate: string;
+  setupLanguages?: AgentSetupLanguage[];
   isDefault: boolean;
 }
 
@@ -220,6 +222,7 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 # name: agent.run
 # attributes: tracey.run.id, tracey.agent.name,
 # tracey.agent.version, deployment.environment.name`,
+        setupLanguages: ["python", "node", "otlp"],
         isDefault: true,
       }],
     },

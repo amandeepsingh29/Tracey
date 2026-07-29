@@ -31,7 +31,22 @@ export type AgentOnboardingSource = {
   telemetryContractVersion: string;
   instructions: string[];
   configurationTemplate: string;
+  setupLanguages?: AgentSetupLanguage[];
   isDefault: boolean;
+};
+
+export type AgentSetupLanguage = "python" | "node" | "otlp";
+
+export type GeneratedAgentSetup = {
+  language: AgentSetupLanguage;
+  languageName: string;
+  endpoint: string;
+  installCommands: string[];
+  environment: string;
+  code: string;
+  runCommand: string;
+  contractVersion: string;
+  expectedSpans: string[];
 };
 
 export type ConnectorCatalog = {
@@ -59,6 +74,10 @@ export type AgentConnectionRequest = {
   displayName: string;
   serviceName: string;
   environment: string;
+};
+
+export type AgentSetupRequest = AgentConnectionRequest & {
+  language: AgentSetupLanguage;
 };
 
 export type KubernetesDeploymentSummary = {
@@ -219,6 +238,14 @@ export type ObservedExecution = {
   tools: string[];
   inputTokens?: number;
   outputTokens?: number;
+  costUsd?: number;
+  contract: {
+    version: string;
+    fields: Record<"prompt" | "response" | "model" | "retrieval" | "tools" | "errors" | "tokens" | "cost" | "latency", boolean>;
+    observedFields: number;
+    totalFields: number;
+    completeness: number;
+  };
   eventCount: number;
 };
 
@@ -227,6 +254,7 @@ export type ExecutionSource = {
   displayName: string;
   serviceName?: string;
   producerType: string;
+  producerDisplayName?: string;
   status: "complete" | "empty" | "unavailable" | "not_registered";
   observedExecutions: number;
   limitation?: string;

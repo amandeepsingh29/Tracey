@@ -1,10 +1,10 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ArrowRight, Boxes, ExternalLink, GitBranch, RefreshCw, Search, ShieldCheck, Timer, TriangleAlert } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, Bookmark, Boxes, ExternalLink, GitBranch, Pause, Play, RefreshCw, Search, ShieldCheck, Timer, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, ErrorState, JsonView, LoadingState, MetricCard, PageHeader, Panel, StatusChip } from "../components/ui";
 import { ExecutionGraphDetail } from "../components/ExecutionGraph";
 import { api } from "../lib/api";
@@ -12,6 +12,7 @@ import { dateTime, duration, titleCase } from "../lib/format";
 import type { ExecutionFeed, ObservedExecution, TraceDetails } from "../types";
 
 const day = 86_400_000;
+const savedViewsKey = "tracey:runs:saved-views:v1";
 const shortId = (value: string, length = 20) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
 type TraceSpanView = NonNullable<TraceDetails["spans"]>[number];
 
@@ -98,6 +99,37 @@ function agentExchange(spans: TraceSpanView[]) {
   return events;
 }
 
+function traceContract(spans: TraceSpanView[]) {
+  const root = spans.find((span) => span.name === "agent.run" && !span.parentSpanId)
+    ?? spans.find((span) => span.name === "agent.run");
+  const attributes = spans.map(({ attributes }) => attributes as Record<string, unknown>);
+  const has = (key: string) => attributes.some((item) => item[key] !== undefined && item[key] !== null && item[key] !== "");
+  const fields = {
+    prompt: Boolean(root && spanAttribute(root, "tracey.content.input")),
+    response: Boolean(root && spanAttribute(root, "tracey.content.output")),
+    model: has("gen_ai.response.model") || has("gen_ai.request.model"),
+    retrieval: spans.some((span) => String(span.name).startsWith("retrieval ") || spanAttribute(span, "gen_ai.operation.name") === "retrieval"),
+    tools: has("gen_ai.tool.name"),
+    errors: spans.some((span) => span.hasError !== undefined || span.statusCode !== undefined),
+    tokens: has("gen_ai.usage.input_tokens") || has("gen_ai.usage.output_tokens"),
+    cost: has("tracey.cost.usd") || has("tracey.cost.nano_usd"),
+    latency: spans.some((span) => span.durationMs !== undefined),
+  };
+  const observed = Object.values(fields).filter(Boolean).length;
+  const number = (key: string) => attributes.reduce((sum, item) => {
+    const value = Number(item[key] ?? 0);
+    return sum + (Number.isFinite(value) ? value : 0);
+  }, 0);
+  return {
+    fields,
+    observed,
+    total: Object.keys(fields).length,
+    inputTokens: number("gen_ai.usage.input_tokens"),
+    outputTokens: number("gen_ai.usage.output_tokens"),
+    costUsd: number("tracey.cost.usd"),
+  };
+}
+
 type RunFilters = {
   sourceId: string;
   producerType: string;
@@ -116,7 +148,10 @@ export function executionFilterOptions(feed: ExecutionFeed | undefined) {
   const sources = feed?.sources ?? [];
   return {
     sources: [...sources].sort((left, right) => left.displayName.localeCompare(right.displayName)),
-    producerTypes: uniqueSorted(sources.map(({ producerType }) => producerType)),
+    producerTypes: [...new Map(sources.map((source) => [
+      source.producerType,
+      { value: source.producerType, label: source.producerDisplayName ?? titleCase(source.producerType) },
+    ])).values()].sort((left, right) => left.label.localeCompare(right.label)),
     environments: uniqueSorted(executions.map(({ environment }) => environment)),
     statuses: uniqueSorted(executions.map(({ status }) => status)),
     models: uniqueSorted(executions.map(({ model }) => model)),
@@ -153,15 +188,67 @@ export function RunsPage() {
   const [model, setModel] = useState(params.get("model") ?? "all");
   const [tool, setTool] = useState(params.get("tool") ?? "all");
   const [rangeHours, setRangeHours] = useState(Number(params.get("hours") ?? 24));
-  const end = Date.now();
-  const start = end - rangeHours * 3_600_000;
-  const feed = useQuery({ queryKey: ["executions", rangeHours], queryFn: () => api.executions(start, end), staleTime: 30_000, retry: false });
-  const setFilter = (key: string, value: string) => { const next = new URLSearchParams(params.toString()); if (value && value !== "all") next.set(key, value); else next.delete(key); router.replace(`/runs?${next.toString()}`, { scroll: false }); };
+  const [page, setPage] = useState(Math.max(1, Number(params.get("page") ?? 1)));
+  const [pageSize, setPageSize] = useState(Math.max(10, Number(params.get("pageSize") ?? 25)));
+  const [liveRefresh, setLiveRefresh] = useState(true);
+  const [savedViews, setSavedViews] = useState<Array<{ name: string; query: string }>>([]);
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(savedViewsKey) ?? "[]");
+      if (Array.isArray(parsed)) setSavedViews(parsed.filter((item) => typeof item?.name === "string" && typeof item?.query === "string"));
+    } catch {
+      setSavedViews([]);
+    }
+  }, []);
+  const feed = useQuery({
+    queryKey: ["executions", rangeHours],
+    queryFn: () => { const end = Date.now(); return api.executions(end - rangeHours * 3_600_000, end, 500); },
+    staleTime: 10_000,
+    refetchInterval: liveRefresh ? 15_000 : false,
+    retry: false,
+  });
+  const setFilter = (key: string, value: string) => {
+    const next = new URLSearchParams(params.toString());
+    if (value && value !== "all") next.set(key, value); else next.delete(key);
+    if (key !== "page") next.delete("page");
+    router.replace(`/runs?${next.toString()}`, { scroll: false });
+  };
   const sources = feed.data?.sources ?? [];
   const options = useMemo(() => executionFilterOptions(feed.data), [feed.data]);
   const rows = useMemo(() => filterExecutions(feed.data?.executions ?? [], {
     sourceId, producerType: producer, environment, status, model, tool, search,
   }), [environment, feed.data?.executions, model, producer, search, sourceId, status, tool]);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  useEffect(() => {
+    if (page > pageCount) {
+      setPage(pageCount);
+      setFilter("page", String(pageCount));
+    }
+  }, [page, pageCount]);
+  const saveView = () => {
+    const name = window.prompt("Name this run view")?.trim();
+    if (!name) return;
+    const next = [...savedViews.filter((item) => item.name !== name), { name, query: params.toString() }]
+      .sort((left, right) => left.name.localeCompare(right.name));
+    setSavedViews(next);
+    localStorage.setItem(savedViewsKey, JSON.stringify(next));
+  };
+  const applySavedView = (query: string) => {
+    const saved = new URLSearchParams(query);
+    setSearch(saved.get("search") ?? "");
+    setStatus(saved.get("status") ?? "all");
+    setSourceId(saved.get("source") ?? "all");
+    setProducer(saved.get("producer") ?? "all");
+    setEnvironment(saved.get("environment") ?? "all");
+    setModel(saved.get("model") ?? "all");
+    setTool(saved.get("tool") ?? "all");
+    setRangeHours(Number(saved.get("hours") ?? 24));
+    setPage(Number(saved.get("page") ?? 1));
+    setPageSize(Number(saved.get("pageSize") ?? 25));
+    router.replace(query ? `/runs?${query}` : "/runs", { scroll: false });
+  };
   const failed = rows.filter(({ status: value }) => value === "failed").length;
   const activeSources = sources.filter(({ status: value }) => value === "complete").length;
   const openExecution = (execution: NonNullable<typeof feed.data>["executions"][number]) => {
@@ -182,12 +269,12 @@ export function RunsPage() {
       return;
     }
   };
-  return <div className="page runs-page"><PageHeader eyebrow="AGENT EXECUTIONS" title="Runs" description="Explore executions from the agents registered in this workspace. Every source and filter comes from live registration and telemetry data." actions={<><Link className="button button-secondary" href="/agents">Manage agents</Link><Button variant="secondary" disabled={feed.isFetching} onClick={() => void feed.refetch()}><RefreshCw size={15} />Refresh runs</Button></>} />
+  return <div className="page runs-page"><PageHeader eyebrow="AGENT EXECUTIONS" title="Runs" description="Explore executions from the agents registered in this workspace. Every source and filter comes from live registration and telemetry data." actions={<><Link className="button button-secondary" href="/agents">Manage agents</Link><Button variant="secondary" onClick={saveView}><Bookmark size={15} />Save view</Button><Button variant="secondary" onClick={() => setLiveRefresh((value) => !value)}>{liveRefresh ? <Pause size={15} /> : <Play size={15} />}{liveRefresh ? "Live · 15s" : "Resume live"}</Button><Button variant="secondary" disabled={feed.isFetching} onClick={() => void feed.refetch()}><RefreshCw size={15} />Refresh runs</Button></>} />
     {feed.isLoading ? <LoadingState label="Querying connected execution sources" /> : feed.error ? <ErrorState error={feed.error} onRetry={() => void feed.refetch()} /> : <>
-      <div className="filter-bar run-filters"><label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); setFilter("search", event.target.value); }} placeholder="Run, trace, agent, service…" /></label><select value={sourceId} onChange={(event) => { setSourceId(event.target.value); setFilter("source", event.target.value); }} aria-label="Agent source"><option value="all">All agents</option>{options.sources.map((source) => <option key={source.sourceId} value={source.sourceId}>{source.displayName}</option>)}</select><select value={producer} onChange={(event) => { setProducer(event.target.value); setFilter("producer", event.target.value); }} aria-label="Integration type"><option value="all">All integration types</option>{options.producerTypes.map((value) => <option key={value} value={value}>{titleCase(value)}</option>)}</select><select value={environment} onChange={(event) => { setEnvironment(event.target.value); setFilter("environment", event.target.value); }}><option value="all">All environments</option>{options.environments.map((value) => <option key={value}>{value}</option>)}</select><select value={status} onChange={(event) => { setStatus(event.target.value); setFilter("status", event.target.value); }} aria-label="Execution status"><option value="all">All statuses</option>{options.statuses.map((value) => <option key={value}>{titleCase(value)}</option>)}</select><select className="filter-input" value={model} onChange={(event) => { setModel(event.target.value); setFilter("model", event.target.value); }} aria-label="Model"><option value="all">All models</option>{options.models.map((value) => <option key={value}>{value}</option>)}</select><select className="filter-input" value={tool} onChange={(event) => { setTool(event.target.value); setFilter("tool", event.target.value); }} aria-label="Tool"><option value="all">All tools</option>{options.tools.map((value) => <option key={value}>{value}</option>)}</select><select value={rangeHours} onChange={(event) => { setRangeHours(Number(event.target.value)); setFilter("hours", event.target.value); }}><option value={1}>1 hour</option><option value={24}>24 hours</option><option value={168}>7 days</option></select></div>
+      <div className="filter-bar run-filters"><label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setFilter("search", event.target.value); }} placeholder="Run, trace, agent, service…" /></label>{savedViews.length > 0 && <select defaultValue="" onChange={(event) => applySavedView(event.target.value)} aria-label="Saved run view"><option value="">Saved views</option>{savedViews.map((view) => <option key={view.name} value={view.query}>{view.name}</option>)}</select>}<select value={sourceId} onChange={(event) => { setSourceId(event.target.value); setPage(1); setFilter("source", event.target.value); }} aria-label="Agent source"><option value="all">All agents</option>{options.sources.map((source) => <option key={source.sourceId} value={source.sourceId}>{source.displayName}</option>)}</select><select value={producer} onChange={(event) => { setProducer(event.target.value); setPage(1); setFilter("producer", event.target.value); }} aria-label="Integration type"><option value="all">All integration types</option>{options.producerTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><select value={environment} onChange={(event) => { setEnvironment(event.target.value); setPage(1); setFilter("environment", event.target.value); }}><option value="all">All environments</option>{options.environments.map((value) => <option key={value}>{value}</option>)}</select><select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); setFilter("status", event.target.value); }} aria-label="Execution status"><option value="all">All statuses</option>{options.statuses.map((value) => <option key={value}>{titleCase(value)}</option>)}</select><select className="filter-input" value={model} onChange={(event) => { setModel(event.target.value); setPage(1); setFilter("model", event.target.value); }} aria-label="Model"><option value="all">All models</option>{options.models.map((value) => <option key={value}>{value}</option>)}</select><select className="filter-input" value={tool} onChange={(event) => { setTool(event.target.value); setPage(1); setFilter("tool", event.target.value); }} aria-label="Tool"><option value="all">All tools</option>{options.tools.map((value) => <option key={value}>{value}</option>)}</select><select value={rangeHours} onChange={(event) => { setRangeHours(Number(event.target.value)); setPage(1); setFilter("hours", event.target.value); }}><option value={1}>1 hour</option><option value={24}>24 hours</option><option value={168}>7 days</option></select></div>
       <div className="metrics-grid execution-metrics"><MetricCard icon={Activity} label="Runs in view" value={rows.length} detail={`Last ${rangeHours === 168 ? "7 days" : `${rangeHours} hour${rangeHours === 1 ? "" : "s"}`}`} /><MetricCard icon={TriangleAlert} label="Failed in view" value={failed} detail={failed ? "Failure evidence emitted" : "No observed failures"} tone={failed ? "danger" : "default"} /><MetricCard icon={Boxes} label="Queryable agents" value={`${activeSources}/${sources.length}`} detail={`${feed.data?.registeredAgentCount ?? 0} active registrations`} /><MetricCard icon={ShieldCheck} label="Run details" value={rows.some((execution) => execution.traceId || execution.conversationId) ? "Available" : "Not emitted"} detail="Open an observed run to inspect evidence" /></div>
       {sources.length > 0 && <Panel className="execution-sources" title="Registered execution sources" subtitle="This list is generated from active agent registrations and their live query results."><div className="execution-source-grid">{sources.map((source) => <div key={source.sourceId}><span className="source-icon"><Boxes /></span><div><strong>{source.displayName}</strong><code>{source.serviceName ?? titleCase(source.producerType)}</code>{source.limitation && <small>{source.limitation}</small>}</div><span className="source-count">{source.observedExecutions}</span><StatusChip value={source.status} /></div>)}</div></Panel>}
-      {rows.length === 0 ? <EmptyState icon={Activity} title={feed.data?.executions.length ? "No executions match these filters" : sources.length ? "No runs observed in this window" : "No agents are registered"} description={sources.length ? "Expand the time window, change a filter, or verify that the selected agent emits Tracey’s OpenTelemetry run contract." : "Register the agent services this workspace should observe. Tracey will query only those registered sources."} action={<div className="empty-actions"><Button variant="secondary" onClick={() => { setRangeHours(168); setFilter("hours", "168"); }}>Search 7 days</Button><Link className="button button-primary" href="/agents">Manage agents</Link></div>} /> : <Panel className="execution-table"><div className="table-wrap"><table><thead><tr><th>Execution</th><th>Agent</th><th>Status</th><th>Model</th><th>Tools</th><th>Tokens</th><th>Duration</th><th>Started</th><th>Details</th></tr></thead><tbody>{rows.map((execution) => {
+      {rows.length === 0 ? <EmptyState icon={Activity} title={feed.data?.executions.length ? "No executions match these filters" : sources.length ? "No runs observed in this window" : "No agents are registered"} description={sources.length ? "Expand the time window, change a filter, or verify that the selected agent emits Tracey’s OpenTelemetry run contract." : "Register the agent services this workspace should observe. Tracey will query only those registered sources."} action={<div className="empty-actions"><Button variant="secondary" onClick={() => { setRangeHours(168); setFilter("hours", "168"); }}>Search 7 days</Button><Link className="button button-primary" href="/agents">Manage agents</Link></div>} /> : <Panel className="execution-table"><div className="table-wrap"><table><thead><tr><th>Execution</th><th>Agent</th><th>Status</th><th>Model</th><th>Tools</th><th>Tokens</th><th>Cost</th><th>Coverage</th><th>Duration</th><th>Started</th><th>Details</th></tr></thead><tbody>{visibleRows.map((execution) => {
         const secondaryId = execution.conversationId && execution.conversationId !== execution.runId
           ? { label: "Conversation", value: execution.conversationId }
           : execution.traceId && execution.traceId !== execution.runId
@@ -200,11 +287,13 @@ export function RunsPage() {
           <td>{execution.model ?? <span className="muted-dash" aria-label="Model not emitted">—</span>}</td>
           <td>{execution.tools.length ? <span className="execution-tools">{execution.tools.slice(0, 2).map((name) => <code key={name}>{name}</code>)}{execution.tools.length > 2 && <small>+{execution.tools.length - 2}</small>}</span> : <span className="muted-dash" aria-label="No tools emitted">—</span>}</td>
           <td>{execution.inputTokens || execution.outputTokens ? `${(execution.inputTokens ?? 0) + (execution.outputTokens ?? 0)}` : "—"}</td>
+          <td>{execution.costUsd === undefined ? "—" : `$${execution.costUsd.toFixed(6)}`}</td>
+          <td><span className={`contract-score ${execution.contract.completeness === 1 ? "complete" : ""}`} title={`Observed: ${Object.entries(execution.contract.fields).filter(([, present]) => present).map(([name]) => name).join(", ") || "none"}. Missing: ${Object.entries(execution.contract.fields).filter(([, present]) => !present).map(([name]) => name).join(", ") || "none"}`}>{Math.round(execution.contract.completeness * 100)}%</span></td>
           <td>{execution.durationMs === undefined ? "—" : duration(execution.durationMs)}</td>
           <td className="execution-started">{dateTime(execution.startedAt)}</td>
           <td>{execution.traceId || execution.conversationId ? <Button variant="secondary" onClick={(event) => { event.stopPropagation(); openExecution(execution); }}>{execution.conversationId ? "View graph" : "View trace"}<ArrowRight size={14} /></Button> : <span className="muted-dash">Unavailable</span>}</td>
         </tr>;
-      })}</tbody></table></div>{feed.data?.truncated && <p className="table-note">Showing the newest {rows.length} executions. Narrow the filters or time range for a more focused result.</p>}</Panel>}
+      })}</tbody></table></div><div className="table-pagination"><span>Showing {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, rows.length)} of {rows.length}</span><select value={pageSize} onChange={(event) => { const value = Number(event.target.value); setPageSize(value); setPage(1); setFilter("pageSize", String(value)); }} aria-label="Rows per page"><option value={25}>25 per page</option><option value={50}>50 per page</option><option value={100}>100 per page</option></select><Button variant="secondary" disabled={currentPage <= 1} onClick={() => { const value = currentPage - 1; setPage(value); setFilter("page", String(value)); }}>Previous</Button><span>Page {currentPage} of {pageCount}</span><Button variant="secondary" disabled={currentPage >= pageCount} onClick={() => { const value = currentPage + 1; setPage(value); setFilter("page", String(value)); }}>Next</Button></div>{feed.data?.truncated && <p className="table-note">The backend returned its newest 500 executions. Narrow the time range before treating this as a complete historical result.</p>}</Panel>}
     </>}
   </div>;
 }
@@ -242,10 +331,12 @@ export function RunDetailPage() {
   const ranked = [...spans].sort((a, b) => Number(b.durationMs ?? 0) - Number(a.durationMs ?? 0));
   const tree = spanTree(spans);
   const exchange = agentExchange(spans);
+  const contract = traceContract(spans);
   const failures = spans.filter((span) => span.hasError);
   const signozUrl = connectors.data?.connectors.find((connector) => connector.id === "signoz")?.configuration?.publicConfig.apiUrl;
   return <div className="page"><button className="back-link" onClick={() => router.back()}><ArrowLeft size={15} />Runs</button><PageHeader eyebrow="TRACE EVIDENCE" title={`Run ${traceId.slice(0, 12)}…`} description="See what the user asked, how the agent routed the request, each model exchange, tool inputs and results, and the final answer." actions={<>{typeof signozUrl === "string" && <a className="button button-ghost" href={`${signozUrl.replace(/\/$/, "")}/trace/${traceId}`} target="_blank" rel="noreferrer"><ExternalLink size={16} />Open in SigNoz</a>}<Link className="button button-secondary" href={`/investigations?new=true&traceId=${encodeURIComponent(traceId)}&start=${start}&end=${end}`}><ShieldCheck size={16} />Investigate</Link></>} />
-    <div className="metrics-grid"><div className="metric-card"><div className="metric-icon"><GitBranch size={18} /></div><p>Observed spans</p><strong>{spans.length}</strong><span>Returned by SigNoz</span></div><div className="metric-card tone-danger"><div className="metric-icon"><TriangleAlert size={18} /></div><p>Error spans</p><strong>{failures.length}</strong><span>No inferred failures included</span></div><div className="metric-card"><div className="metric-icon"><Timer size={18} /></div><p>Critical span</p><strong>{duration(Number(ranked[0]?.durationMs ?? 0))}</strong><span>{ranked[0]?.name ?? "No spans"}</span></div></div>
+    <div className="metrics-grid"><div className="metric-card"><div className="metric-icon"><GitBranch size={18} /></div><p>Observed spans</p><strong>{spans.length}</strong><span>Returned by SigNoz</span></div><div className="metric-card tone-danger"><div className="metric-icon"><TriangleAlert size={18} /></div><p>Error spans</p><strong>{failures.length}</strong><span>No inferred failures included</span></div><div className="metric-card"><div className="metric-icon"><Timer size={18} /></div><p>Critical span</p><strong>{duration(Number(ranked[0]?.durationMs ?? 0))}</strong><span>{ranked[0]?.name ?? "No spans"}</span></div><div className="metric-card"><div className="metric-icon"><Activity size={18} /></div><p>Contract coverage</p><strong>{Math.round(contract.observed / contract.total * 100)}%</strong><span>{contract.observed}/{contract.total} fields observed</span></div></div>
+    <Panel title="Telemetry contract" subtitle="Present means the producer emitted verifiable evidence. Missing is not treated as a successful empty value."><div className="contract-field-grid">{Object.entries(contract.fields).map(([field, present]) => <div key={field} className={present ? "present" : "missing"}><span>{titleCase(field)}</span><strong>{present ? "Present" : "Not emitted"}</strong></div>)}</div><div className="contract-totals"><span>Input tokens <strong>{contract.inputTokens || "Not emitted"}</strong></span><span>Output tokens <strong>{contract.outputTokens || "Not emitted"}</strong></span><span>Cost <strong>{contract.costUsd ? `$${contract.costUsd.toFixed(6)}` : "Not emitted"}</strong></span></div></Panel>
     <Panel title="Agent conversation" subtitle="Chronological developer view of the prompt, routing, model exchanges, tool work, and response. Credential-like values are redacted before export.">{exchange.length === 0 ? <EmptyState title="Content was not captured for this run" description="This trace predates developer content capture. Generate a new Notes Agent run to inspect the complete exchange." /> : <div className="agent-exchange">{exchange.map((event, index) => <article className={`exchange-${event.kind}`} key={`${event.kind}-${index}`}><header><span>{event.kind}</span><strong>{event.label}</strong>{event.detail && <small>{event.detail}</small>}</header>{event.input && <div><span>{event.kind === "prompt" ? "Prompt" : "Input"}</span><pre>{readableContent(event.input)}</pre></div>}{event.output && <div><span>{event.kind === "final" ? "Response" : "Output"}</span><pre>{readableContent(event.output)}</pre></div>}</article>)}</div>}</Panel>
     <Panel title="Run execution tree" subtitle="Every observed span is shown in parent-child order, from the agent request through model calls, tools, and database work.">{tree.length === 0 ? <EmptyState title="No span graph returned" description="The trace exists but its normalized span fields were not available in this query window." /> : <div className="span-waterfall span-tree">{tree.map(({ span, depth }, index) => <div className={String(span.name ?? "").startsWith("execute_tool") ? "span-tool-row" : ""} style={{ paddingLeft: `${10 + Math.min(depth, 8) * 22}px` }} key={String(span.spanId ?? index)}><span className={span.hasError ? "span-error" : ""} style={{ width: `${Math.max(8, Number(span.durationMs ?? 0) / Math.max(1, Number(ranked[0]?.durationMs ?? 1)) * 100)}%` }} /><strong>{depth > 0 && <span className="span-tree-branch">↳</span>}{span.name ?? "Unnamed span"}</strong><small>{span.serviceName ?? "unknown service"} · {duration(Number(span.durationMs ?? 0))}</small>{span.hasError && <StatusChip value="failed" />}</div>)}</div>}</Panel>
     <div className="two-column"><Panel title="Observed facts"><JsonView value={{ traceId, spans, evidence: query.data.evidence, query: query.data.query }} label="Sanitized trace evidence" /></Panel><Panel title="Inferred analysis"><JsonView value={{ analysis: query.data.analysis, diagnosis: query.data.diagnosis }} label="Tracey inference" /></Panel></div>
