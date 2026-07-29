@@ -2,6 +2,7 @@ import type { AgentRunSummary, TraceLog } from "@tracey/domain";
 
 export type ObservedExecution = {
   executionId: string;
+  sourceId: string;
   producerType: "codex_desktop" | "codex_cli" | "claude_code" | "custom_otel";
   producerName: string;
   serviceName: string;
@@ -35,6 +36,7 @@ function usefulTraceId(traceId: string): string | undefined {
 
 export function codexLogsToExecutions(input: {
   logs: TraceLog[];
+  sourceId: string;
   serviceName: string;
   producerName: string;
   environment: string;
@@ -60,6 +62,7 @@ export function codexLogsToExecutions(input: {
     const failed = attributes.some((item) => item.success === false || typeof item["error.type"] === "string");
     return {
       executionId: key,
+      sourceId: input.sourceId,
       producerType: input.producerType ?? "codex_desktop",
       producerName: input.producerName,
       serviceName: input.serviceName,
@@ -81,6 +84,7 @@ export function codexLogsToExecutions(input: {
 
 export function agentRunsToExecutions(input: {
   runs: AgentRunSummary[];
+  sourceId: string;
   producerType: "claude_code" | "custom_otel";
   producerName: string;
   serviceName: string;
@@ -88,6 +92,7 @@ export function agentRunsToExecutions(input: {
 }): ObservedExecution[] {
   return input.runs.map((run) => ({
     executionId: `trace:${run.traceId}`,
+    sourceId: input.sourceId,
     producerType: input.producerType,
     producerName: input.producerName,
     serviceName: input.serviceName,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ArrowRight, Bot, Boxes, ExternalLink, GitBranch, MessageSquareText, RefreshCw, Search, ShieldCheck, Timer, TriangleAlert, Wrench } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, Boxes, ExternalLink, GitBranch, RefreshCw, Search, ShieldCheck, Timer, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -9,7 +9,7 @@ import { Button, EmptyState, ErrorState, JsonView, LoadingState, MetricCard, Pag
 import { ExecutionGraphDetail } from "../components/ExecutionGraph";
 import { api } from "../lib/api";
 import { dateTime, duration, titleCase } from "../lib/format";
-import type { TraceDetails } from "../types";
+import type { ExecutionFeed, ObservedExecution, TraceDetails } from "../types";
 
 const day = 86_400_000;
 const shortId = (value: string, length = 20) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
@@ -98,36 +98,72 @@ function agentExchange(spans: TraceSpanView[]) {
   return events;
 }
 
+type RunFilters = {
+  sourceId: string;
+  producerType: string;
+  environment: string;
+  status: string;
+  model: string;
+  tool: string;
+  search: string;
+};
+
+const uniqueSorted = (values: Array<string | undefined>) =>
+  [...new Set(values.filter((value): value is string => Boolean(value)))].sort((left, right) => left.localeCompare(right));
+
+export function executionFilterOptions(feed: ExecutionFeed | undefined) {
+  const executions = feed?.executions ?? [];
+  const sources = feed?.sources ?? [];
+  return {
+    sources: [...sources].sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    producerTypes: uniqueSorted(sources.map(({ producerType }) => producerType)),
+    environments: uniqueSorted(executions.map(({ environment }) => environment)),
+    statuses: uniqueSorted(executions.map(({ status }) => status)),
+    models: uniqueSorted(executions.map(({ model }) => model)),
+    tools: uniqueSorted(executions.flatMap(({ tools }) => tools)),
+  };
+}
+
+export function filterExecutions(executions: ObservedExecution[], filters: RunFilters) {
+  const term = filters.search.trim().toLowerCase();
+  return executions.filter((execution) =>
+    (filters.sourceId === "all" || execution.sourceId === filters.sourceId)
+    && (filters.producerType === "all" || execution.producerType === filters.producerType)
+    && (filters.environment === "all" || execution.environment === filters.environment)
+    && (filters.status === "all" || execution.status === filters.status)
+    && (filters.model === "all" || execution.model === filters.model)
+    && (filters.tool === "all" || execution.tools.includes(filters.tool))
+    && (!term || [
+      execution.runId,
+      execution.traceId,
+      execution.conversationId,
+      execution.producerName,
+      execution.serviceName,
+    ].some((item) => String(item ?? "").toLowerCase().includes(term))));
+}
+
 export function RunsPage() {
   const params = useSearchParams();
   const router = useRouter();
-  const [conversationLookup, setConversationLookup] = useState("");
   const [search, setSearch] = useState(params.get("search") ?? "");
   const [status, setStatus] = useState(params.get("status") ?? "all");
+  const [sourceId, setSourceId] = useState(params.get("source") ?? "all");
   const [producer, setProducer] = useState(params.get("producer") ?? "all");
   const [environment, setEnvironment] = useState(params.get("environment") ?? "all");
-  const [model, setModel] = useState(params.get("model") ?? "");
-  const [tool, setTool] = useState(params.get("tool") ?? "");
+  const [model, setModel] = useState(params.get("model") ?? "all");
+  const [tool, setTool] = useState(params.get("tool") ?? "all");
   const [rangeHours, setRangeHours] = useState(Number(params.get("hours") ?? 24));
   const end = Date.now();
   const start = end - rangeHours * 3_600_000;
   const feed = useQuery({ queryKey: ["executions", rangeHours], queryFn: () => api.executions(start, end), staleTime: 30_000, retry: false });
-  const recentCodex = useQuery({ queryKey: ["recent-codex-conversations"], queryFn: () => api.recentCodexConversations(168, 40), staleTime: 15_000, retry: false });
-  const rows = useMemo(() => (feed.data?.executions ?? []).filter((execution) => {
-    const term = search.toLowerCase();
-    return (status === "all" || execution.status === status)
-      && (producer === "all" || execution.producerType === producer)
-      && (environment === "all" || execution.environment === environment)
-      && (!term || [execution.runId, execution.traceId, execution.conversationId, execution.producerName, execution.serviceName].some((item) => String(item ?? "").toLowerCase().includes(term)))
-      && (!model || execution.model?.toLowerCase().includes(model.toLowerCase()))
-      && (!tool || execution.tools.some((value) => value.toLowerCase().includes(tool.toLowerCase())));
-  }), [environment, feed.data?.executions, model, producer, search, status, tool]);
   const setFilter = (key: string, value: string) => { const next = new URLSearchParams(params.toString()); if (value && value !== "all") next.set(key, value); else next.delete(key); router.replace(`/runs?${next.toString()}`, { scroll: false }); };
   const sources = feed.data?.sources ?? [];
-  const failed = (feed.data?.executions ?? []).filter(({ status: value }) => value === "failed").length;
+  const options = useMemo(() => executionFilterOptions(feed.data), [feed.data]);
+  const rows = useMemo(() => filterExecutions(feed.data?.executions ?? [], {
+    sourceId, producerType: producer, environment, status, model, tool, search,
+  }), [environment, feed.data?.executions, model, producer, search, sourceId, status, tool]);
+  const failed = rows.filter(({ status: value }) => value === "failed").length;
   const activeSources = sources.filter(({ status: value }) => value === "complete").length;
-  const environments = [...new Set((feed.data?.executions ?? []).map((item) => item.environment))];
-  const recentTurns = recentCodex.data?.conversations ?? [];
   const openExecution = (execution: NonNullable<typeof feed.data>["executions"][number]) => {
     const executionStart = Date.parse(execution.startedAt);
     if (execution.conversationId) {
@@ -146,53 +182,12 @@ export function RunsPage() {
       return;
     }
   };
-  const openCodexTurn = (turn: NonNullable<typeof recentCodex.data>["conversations"][number]) => {
-    const executionStart = Date.parse(turn.startedAt);
-    const query = new URLSearchParams({
-      conversationId: turn.conversationId,
-      serviceName: "codex-app-server",
-      turnIndex: String(turn.turnIndex),
-      at: String(executionStart),
-      start: String(Math.max(0, executionStart - 3_600_000)),
-      end: String(executionStart + day),
-    });
-    router.push(`/runs/${encodeURIComponent(`codex:${turn.conversationId}:${turn.turnIndex}`)}?${query.toString()}`);
-  };
-  const openConversation = () => {
-    const conversationId = conversationLookup.trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) return;
-    const now = Date.now();
-    const query = new URLSearchParams({
-      conversationId,
-      serviceName: "codex-app-server",
-      start: String(now - 7 * day),
-      end: String(now),
-    });
-    router.push(`/runs/${encodeURIComponent(`conversation:${conversationId}`)}?${query.toString()}`);
-  };
-  const lookupValid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationLookup.trim());
-  return <div className="page runs-page"><PageHeader eyebrow="AGENT ACTIVITY" title="What did my agents do?" description="Start with a recent Codex prompt, then open its complete prompt-to-action graph. Advanced telemetry from every connected agent remains available below." actions={<Button variant="secondary" disabled={feed.isFetching || recentCodex.isFetching} onClick={() => { void feed.refetch(); void recentCodex.refetch(); }}><RefreshCw size={15} />Refresh activity</Button>} />
-    <Panel className="recent-codex-panel" title="Recent Codex prompts" subtitle="Each item is one prompt and everything it caused. Choose one to see model responses, commands, tool results, failures, and the final answer.">
-      <form className="conversation-lookup" onSubmit={(event) => { event.preventDefault(); openConversation(); }}>
-        <label><Search size={16} /><input value={conversationLookup} onChange={(event) => setConversationLookup(event.target.value)} placeholder="Paste a Codex conversation ID" aria-label="Codex conversation ID" /></label>
-        <Button disabled={!lookupValid}>Open latest turn</Button>
-      </form>
-      {recentCodex.isLoading ? <LoadingState label="Finding your recent Codex prompts" />
-        : recentCodex.error ? <ErrorState error={recentCodex.error} onRetry={() => void recentCodex.refetch()} />
-          : recentTurns.length === 0 ? <EmptyState icon={MessageSquareText} title="No recent local Codex prompts found" description="Use Codex normally, then refresh this page. Tracey will list each observed prompt here." />
-            : <div className="codex-turn-list">{recentTurns.slice(0, 16).map((turn) => <article key={`${turn.conversationId}:${turn.turnIndex}`}>
-              <span className="codex-turn-icon"><MessageSquareText /></span>
-              <div className="codex-turn-copy"><div className="codex-turn-meta"><strong>Codex · Turn {turn.turnIndex}</strong><span>{dateTime(turn.startedAt)}</span></div><p>{turn.prompt}</p><footer><code title={turn.conversationId}>{shortId(turn.conversationId, 22)}</code><span>{turn.eventCount} steps</span><span>{turn.toolNames.length} tools</span><StatusChip value={turn.status} /></footer></div>
-              <Button variant="secondary" onClick={() => openCodexTurn(turn)}>View graph<ArrowRight size={15} /></Button>
-            </article>)}</div>}
-    </Panel>
-
-    <div className="execution-section-heading"><div><p>ADVANCED ACTIVITY</p><h2>All observed executions</h2><span>Use this table when you need traces, services, models, tokens, or non-Codex agents.</span></div><Link className="button button-secondary" href="/agents">Manage agents</Link></div>
+  return <div className="page runs-page"><PageHeader eyebrow="AGENT EXECUTIONS" title="Runs" description="Explore executions from the agents registered in this workspace. Every source and filter comes from live registration and telemetry data." actions={<><Link className="button button-secondary" href="/agents">Manage agents</Link><Button variant="secondary" disabled={feed.isFetching} onClick={() => void feed.refetch()}><RefreshCw size={15} />Refresh runs</Button></>} />
     {feed.isLoading ? <LoadingState label="Querying connected execution sources" /> : feed.error ? <ErrorState error={feed.error} onRetry={() => void feed.refetch()} /> : <>
-      <div className="metrics-grid execution-metrics"><MetricCard icon={Activity} label="Observed executions" value={feed.data?.executions.length ?? 0} detail={`Last ${rangeHours === 168 ? "7 days" : `${rangeHours} hour${rangeHours === 1 ? "" : "s"}`}`} /><MetricCard icon={TriangleAlert} label="Failed" value={failed} detail={failed ? "Failure evidence emitted" : "No observed failures"} tone={failed ? "danger" : "default"} /><MetricCard icon={Boxes} label="Active sources" value={`${activeSources}/${sources.length}`} detail={`${feed.data?.registeredAgentCount ?? 0} registered agents`} /><MetricCard icon={ShieldCheck} label="Execution detail" value="Available" detail="Open a run to inspect its evidence" /></div>
-      <Panel className="execution-sources" title="Connected execution sources" subtitle="Each source reports its own query result; one unavailable producer does not hide the others."><div className="execution-source-grid">{sources.map((source) => <div key={source.sourceId}><span className="source-icon">{source.producerType.startsWith("codex") ? <Bot /> : source.producerType === "claude_code" ? <Activity /> : <Wrench />}</span><div><strong>{source.displayName}</strong><code>{source.serviceName ?? titleCase(source.producerType)}</code>{source.limitation && <small>{source.limitation}</small>}</div><span className="source-count">{source.observedExecutions}</span><StatusChip value={source.status} /></div>)}</div></Panel>
-      <div className="filter-bar run-filters"><label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); setFilter("search", event.target.value); }} placeholder="Run, conversation, trace, service…" /></label><select value={producer} onChange={(event) => { setProducer(event.target.value); setFilter("producer", event.target.value); }}><option value="all">All producers</option><option value="codex_desktop">Codex</option><option value="claude_code">Claude Code</option><option value="custom_otel">Custom OTel</option></select><select value={environment} onChange={(event) => { setEnvironment(event.target.value); setFilter("environment", event.target.value); }}><option value="all">All environments</option>{environments.map((value) => <option key={value}>{value}</option>)}</select><select value={status} onChange={(event) => { setStatus(event.target.value); setFilter("status", event.target.value); }} aria-label="Execution status"><option value="all">All statuses</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="observed">Observed</option></select><input className="filter-input" value={model} onChange={(event) => { setModel(event.target.value); setFilter("model", event.target.value); }} placeholder="Model" aria-label="Filter by model" /><input className="filter-input" value={tool} onChange={(event) => { setTool(event.target.value); setFilter("tool", event.target.value); }} placeholder="Tool" aria-label="Filter by tool" /><select value={rangeHours} onChange={(event) => { setRangeHours(Number(event.target.value)); setFilter("hours", event.target.value); }}><option value={1}>1 hour</option><option value={24}>24 hours</option><option value={168}>7 days</option></select></div>
-      {rows.length === 0 ? <EmptyState icon={Activity} title={feed.data?.executions.length ? "No executions match these filters" : "No executions observed in this window"} description={feed.data?.registeredAgentCount ? "The connected sources were queried successfully. Expand the time window or validate that the producer emits Tracey’s run contract." : "Use the recent Codex prompt list above, or register Claude Code or a custom OpenTelemetry agent."} action={<div className="empty-actions"><Button variant="secondary" onClick={() => { setRangeHours(168); setFilter("hours", "168"); }}>Search 7 days</Button><Link className="button button-primary" href="/agents">Register an agent</Link></div>} /> : <Panel className="execution-table"><div className="table-wrap"><table><thead><tr><th>Execution</th><th>Producer</th><th>Status</th><th>Model</th><th>Tools</th><th>Tokens</th><th>Duration</th><th>Started</th><th>Details</th></tr></thead><tbody>{rows.map((execution) => {
+      <div className="filter-bar run-filters"><label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); setFilter("search", event.target.value); }} placeholder="Run, trace, agent, service…" /></label><select value={sourceId} onChange={(event) => { setSourceId(event.target.value); setFilter("source", event.target.value); }} aria-label="Agent source"><option value="all">All agents</option>{options.sources.map((source) => <option key={source.sourceId} value={source.sourceId}>{source.displayName}</option>)}</select><select value={producer} onChange={(event) => { setProducer(event.target.value); setFilter("producer", event.target.value); }} aria-label="Integration type"><option value="all">All integration types</option>{options.producerTypes.map((value) => <option key={value} value={value}>{titleCase(value)}</option>)}</select><select value={environment} onChange={(event) => { setEnvironment(event.target.value); setFilter("environment", event.target.value); }}><option value="all">All environments</option>{options.environments.map((value) => <option key={value}>{value}</option>)}</select><select value={status} onChange={(event) => { setStatus(event.target.value); setFilter("status", event.target.value); }} aria-label="Execution status"><option value="all">All statuses</option>{options.statuses.map((value) => <option key={value}>{titleCase(value)}</option>)}</select><select className="filter-input" value={model} onChange={(event) => { setModel(event.target.value); setFilter("model", event.target.value); }} aria-label="Model"><option value="all">All models</option>{options.models.map((value) => <option key={value}>{value}</option>)}</select><select className="filter-input" value={tool} onChange={(event) => { setTool(event.target.value); setFilter("tool", event.target.value); }} aria-label="Tool"><option value="all">All tools</option>{options.tools.map((value) => <option key={value}>{value}</option>)}</select><select value={rangeHours} onChange={(event) => { setRangeHours(Number(event.target.value)); setFilter("hours", event.target.value); }}><option value={1}>1 hour</option><option value={24}>24 hours</option><option value={168}>7 days</option></select></div>
+      <div className="metrics-grid execution-metrics"><MetricCard icon={Activity} label="Runs in view" value={rows.length} detail={`Last ${rangeHours === 168 ? "7 days" : `${rangeHours} hour${rangeHours === 1 ? "" : "s"}`}`} /><MetricCard icon={TriangleAlert} label="Failed in view" value={failed} detail={failed ? "Failure evidence emitted" : "No observed failures"} tone={failed ? "danger" : "default"} /><MetricCard icon={Boxes} label="Queryable agents" value={`${activeSources}/${sources.length}`} detail={`${feed.data?.registeredAgentCount ?? 0} active registrations`} /><MetricCard icon={ShieldCheck} label="Run details" value={rows.some((execution) => execution.traceId || execution.conversationId) ? "Available" : "Not emitted"} detail="Open an observed run to inspect evidence" /></div>
+      {sources.length > 0 && <Panel className="execution-sources" title="Registered execution sources" subtitle="This list is generated from active agent registrations and their live query results."><div className="execution-source-grid">{sources.map((source) => <div key={source.sourceId}><span className="source-icon"><Boxes /></span><div><strong>{source.displayName}</strong><code>{source.serviceName ?? titleCase(source.producerType)}</code>{source.limitation && <small>{source.limitation}</small>}</div><span className="source-count">{source.observedExecutions}</span><StatusChip value={source.status} /></div>)}</div></Panel>}
+      {rows.length === 0 ? <EmptyState icon={Activity} title={feed.data?.executions.length ? "No executions match these filters" : sources.length ? "No runs observed in this window" : "No agents are registered"} description={sources.length ? "Expand the time window, change a filter, or verify that the selected agent emits Tracey’s OpenTelemetry run contract." : "Register the agent services this workspace should observe. Tracey will query only those registered sources."} action={<div className="empty-actions"><Button variant="secondary" onClick={() => { setRangeHours(168); setFilter("hours", "168"); }}>Search 7 days</Button><Link className="button button-primary" href="/agents">Manage agents</Link></div>} /> : <Panel className="execution-table"><div className="table-wrap"><table><thead><tr><th>Execution</th><th>Agent</th><th>Status</th><th>Model</th><th>Tools</th><th>Tokens</th><th>Duration</th><th>Started</th><th>Details</th></tr></thead><tbody>{rows.map((execution) => {
         const secondaryId = execution.conversationId && execution.conversationId !== execution.runId
           ? { label: "Conversation", value: execution.conversationId }
           : execution.traceId && execution.traceId !== execution.runId

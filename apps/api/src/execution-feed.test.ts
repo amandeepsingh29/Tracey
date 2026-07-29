@@ -7,6 +7,7 @@ describe("unified execution feed", () => {
     const traceId = "a".repeat(32);
     const conversationId = crypto.randomUUID();
     const executions = codexLogsToExecutions({
+      sourceId: "agent:codex",
       serviceName: "codex-app-server",
       producerName: "Codex App Server",
       environment: "development",
@@ -16,6 +17,7 @@ describe("unified execution feed", () => {
       ],
     });
     assert.equal(executions.length, 1);
+    assert.equal(executions[0]?.sourceId, "agent:codex");
     assert.equal(executions[0]?.status, "failed");
     assert.equal(executions[0]?.conversationId, conversationId);
     assert.equal(executions[0]?.model, "gpt-5");
@@ -27,6 +29,7 @@ describe("unified execution feed", () => {
 
   it("normalizes registered agent roots without inventing absent model or tool data", () => {
     const executions = agentRunsToExecutions({
+      sourceId: "agent:support",
       producerType: "custom_otel",
       producerName: "Support agent",
       serviceName: "support-agent-api",
@@ -34,6 +37,7 @@ describe("unified execution feed", () => {
       runs: [{ traceId: "b".repeat(32), runId: "run-1", serviceName: "support-agent-api", outcome: "success", startedAt: "2026-07-25T00:00:00.000Z", durationMs: 42 }],
     });
     assert.equal(executions[0]?.status, "succeeded");
+    assert.equal(executions[0]?.sourceId, "agent:support");
     assert.deepEqual(executions[0]?.tools, []);
     assert.equal(executions[0]?.model, undefined);
   });

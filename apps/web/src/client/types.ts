@@ -175,6 +175,7 @@ export type ActionEvent = {
 
 export type ObservedExecution = {
   executionId: string;
+  sourceId: string;
   producerType: "codex_desktop" | "codex_cli" | "claude_code" | "custom_otel";
   producerName: string;
   serviceName: string;

@@ -1005,60 +1005,15 @@ export function buildServer(config: AppConfig) {
       };
       executions: ObservedExecution[];
     };
-    const codexSources = [
-      { serviceName: "codex-app-server" as const, displayName: "Codex App Server" },
-      { serviceName: "Codex Desktop" as const, displayName: "Codex Desktop" },
-    ];
-    const codexTasks = codexSources.map(async ({ serviceName, displayName }): Promise<SourceResult> => {
-      try {
-        const result = await investigations!.getCodexRecentLogs({
-          serviceName,
-          start: parsed.data.start,
-          end: parsed.data.end,
-          limit: Math.min(parsed.data.limit * 20, 1_000),
-        });
-        const executions = codexLogsToExecutions({
-          logs: result.logs,
-          serviceName,
-          producerName: displayName,
-          environment: config.DEPLOYMENT_ENVIRONMENT,
-        });
-        return {
-          source: {
-            sourceId: `codex:${serviceName}`,
-            displayName,
-            serviceName,
-            producerType: "codex_desktop",
-            status: executions.length > 0 ? "complete" : "empty",
-            observedExecutions: executions.length,
-          },
-          executions,
-        };
-      } catch {
-        return {
-          source: {
-            sourceId: `codex:${serviceName}`,
-            displayName,
-            serviceName,
-            producerType: "codex_desktop",
-            status: "unavailable",
-            observedExecutions: 0,
-            limitation: "The bounded SigNoz query for this Codex source failed.",
-          },
-          executions: [],
-        };
-      }
-    });
-    const agentTasks = registered
-      .filter(({ producerType }) => !["codex_desktop", "codex_cli"].includes(producerType))
-      .map(async (agent): Promise<SourceResult> => {
+    const agentTasks = registered.map(async (agent): Promise<SourceResult> => {
+        const sourceId = `agent:${agent.agentId}`;
         if (agent.environment !== config.DEPLOYMENT_ENVIRONMENT) {
           return {
             source: {
-              sourceId: `agent:${agent.agentId}`,
+              sourceId,
               displayName: agent.displayName,
               serviceName: agent.serviceName,
-              producerType: agent.producerType,
+            producerType: agent.producerType,
               status: "unavailable",
               observedExecutions: 0,
               limitation: "The registered environment is outside the configured SigNoz scope.",
@@ -1067,6 +1022,47 @@ export function buildServer(config: AppConfig) {
           };
         }
         try {
+          if (["codex_desktop", "codex_cli"].includes(agent.producerType)) {
+            if (!["codex-app-server", "Codex Desktop"].includes(agent.serviceName)) {
+              return {
+                source: {
+                  sourceId,
+                  displayName: agent.displayName,
+                  serviceName: agent.serviceName,
+                  producerType: agent.producerType,
+                  status: "unavailable",
+                  observedExecutions: 0,
+                  limitation: "This registered Codex producer does not use a supported telemetry service identity.",
+                },
+                executions: [],
+              };
+            }
+            const result = await investigations!.getCodexRecentLogs({
+              serviceName: agent.serviceName as "codex-app-server" | "Codex Desktop",
+              start: parsed.data.start,
+              end: parsed.data.end,
+              limit: Math.min(parsed.data.limit * 20, 1_000),
+            });
+            const executions = codexLogsToExecutions({
+              sourceId,
+              logs: result.logs,
+              serviceName: agent.serviceName,
+              producerName: agent.displayName,
+              environment: agent.environment,
+              producerType: agent.producerType as "codex_desktop" | "codex_cli",
+            });
+            return {
+              source: {
+                sourceId,
+                displayName: agent.displayName,
+                serviceName: agent.serviceName,
+                producerType: agent.producerType,
+                status: executions.length > 0 ? "complete" : "empty",
+                observedExecutions: executions.length,
+              },
+              executions,
+            };
+          }
           const result = await investigations!.searchAgentRuns({
             start: parsed.data.start,
             end: parsed.data.end,
@@ -1075,6 +1071,7 @@ export function buildServer(config: AppConfig) {
             offset: 0,
           }, agent.producerType);
           const executions = agentRunsToExecutions({
+            sourceId,
             runs: result.runs,
             producerType: agent.producerType as "claude_code" | "custom_otel",
             producerName: agent.displayName,
@@ -1083,7 +1080,7 @@ export function buildServer(config: AppConfig) {
           });
           return {
             source: {
-              sourceId: `agent:${agent.agentId}`,
+              sourceId,
               displayName: agent.displayName,
               serviceName: agent.serviceName,
               producerType: agent.producerType,
@@ -1095,7 +1092,7 @@ export function buildServer(config: AppConfig) {
         } catch {
           return {
             source: {
-              sourceId: `agent:${agent.agentId}`,
+              sourceId,
               displayName: agent.displayName,
               serviceName: agent.serviceName,
               producerType: agent.producerType,
@@ -1107,28 +1104,8 @@ export function buildServer(config: AppConfig) {
           };
         }
       });
-    const results = await Promise.all([...codexTasks, ...agentTasks]);
+    const results = await Promise.all(agentTasks);
     const sourceStatuses = results.map(({ source }) => source);
-    if (!registered.some(({ producerType }) => producerType === "claude_code")) {
-      sourceStatuses.push({
-        sourceId: "producer:claude_code",
-        displayName: "Claude Code",
-        producerType: "claude_code",
-        status: "not_registered",
-        observedExecutions: 0,
-        limitation: "Register a Claude Code producer to query its observed interaction roots.",
-      });
-    }
-    if (!registered.some(({ producerType }) => producerType === "custom_otel")) {
-      sourceStatuses.push({
-        sourceId: "producer:custom_otel",
-        displayName: "Custom OpenTelemetry agents",
-        producerType: "custom_otel",
-        status: "not_registered",
-        observedExecutions: 0,
-        limitation: "Register a custom agent service to query its observed agent.run roots.",
-      });
-    }
     const executions = results.flatMap(({ executions: items }) => items)
       .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
       .slice(0, parsed.data.limit);
