@@ -2,7 +2,7 @@
 
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 const issuer = process.env.OIDC_ISSUER_URL;
 const audience = process.env.OIDC_AUDIENCE;
 const token = process.env.TRACEY_OIDC_TEST_TOKEN;

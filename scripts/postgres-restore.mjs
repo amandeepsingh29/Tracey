@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 const backupPath = resolve(process.argv[2] ?? "");
 const targetUrl = process.argv[3] ?? process.env.RESTORE_DATABASE_URL;
 if (!process.argv[2] || !targetUrl) {

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import dotenv from "dotenv";
 import pg from "pg";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 const adminUrl = process.env.DATABASE_URL;
 if (!adminUrl) throw new Error("DATABASE_URL is required");
 const parsed = new URL(adminUrl);

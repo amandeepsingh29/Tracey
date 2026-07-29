@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { get as httpsGet } from "node:https";
 import process from "node:process";
 import { parseAllDocuments } from "yaml";
 
@@ -100,10 +101,24 @@ async function verifyLiveDeployment() {
   assert.equal(url.protocol, "https:", "production verification requires HTTPS");
 
   const namespace = process.env.TRACEY_PRODUCTION_NAMESPACE ?? "production";
-  const healthResponse = await fetch(new URL("/healthz", url), { signal: AbortSignal.timeout(10_000) });
-  assert.equal(healthResponse.ok, true, `public UI health returned HTTP ${healthResponse.status}`);
+  const healthUrl = new URL("/healthz", url);
+  const ca = process.env.TRACEY_PRODUCTION_CA_FILE
+    ? readFileSync(process.env.TRACEY_PRODUCTION_CA_FILE)
+    : undefined;
+  const healthStatus = await new Promise((resolvePromise, reject) => {
+    const request = httpsGet(healthUrl, { ca, timeout: 10_000 }, (response) => {
+      response.resume();
+      response.once("end", () => resolvePromise(response.statusCode ?? 0));
+    });
+    request.once("timeout", () => request.destroy(new Error("public UI health timed out")));
+    request.once("error", reject);
+  });
+  assert.ok(healthStatus >= 200 && healthStatus < 300, `public UI health returned HTTP ${healthStatus}`);
 
-  const payload = JSON.parse(run("kubectl", ["get", "deployment", "-n", namespace, "-o", "json"]));
+  const contextArgs = process.env.TRACEY_KUBERNETES_CONTEXT
+    ? ["--context", process.env.TRACEY_KUBERNETES_CONTEXT]
+    : [];
+  const payload = JSON.parse(run("kubectl", [...contextArgs, "get", "deployment", "-n", namespace, "-o", "json"]));
   const byName = new Map(payload.items.map((item) => [item.metadata.name, item]));
   for (const name of requiredDeployments) {
     const deployment = byName.get(name);
@@ -111,6 +126,11 @@ async function verifyLiveDeployment() {
     assert.equal(deployment.status.observedGeneration, deployment.metadata.generation, `${name} has not observed its latest generation`);
     assert.equal(deployment.status.readyReplicas, deployment.spec.replicas, `${name} is not fully ready`);
     assert.equal(deployment.status.unavailableReplicas ?? 0, 0, `${name} has unavailable replicas`);
+    for (const container of deployment.spec.template.spec.containers ?? []) {
+      assert.ok(!container.image.endsWith(":latest"), `${name}/${container.name} is running a mutable latest tag`);
+      assert.ok(container.image.includes("@sha256:") || /:[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(container.image),
+        `${name}/${container.name} is not pinned to a version or digest`);
+    }
   }
   return { status: "passed", namespace, publicUrl: url.origin, deployments: requiredDeployments.length };
 }

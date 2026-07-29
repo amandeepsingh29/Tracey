@@ -55,8 +55,26 @@ pnpm verify:production
 
 The live gate validates the public TLS connection and health endpoint, observes
 the latest Deployment generations, and requires every replica to be ready with
-zero unavailable replicas. Static success is not a production deployment claim;
-the live gate must also pass.
+zero unavailable replicas. It also rejects live workloads using `latest` or
+another unversioned image reference.
+
+For a reproducible pre-production proof, build the four application images and
+run the complete stack in the dedicated `tracey-test` kind cluster:
+
+```bash
+pnpm verify:production:kind
+```
+
+This command creates an isolated `production` namespace, applies all migrations,
+provisions a non-superuser RLS-enforced application role, deploys every runtime
+component with two replicas, and validates the UI through a temporary
+CA-validated HTTPS endpoint. It removes the namespace and Tracey-owned cluster
+roles afterward. This proves the deployment contract on Kubernetes; it does not
+replace verification of a real public DNS name, ingress controller, managed
+database, or cloud load balancer.
+
+Static or kind success is not a public production deployment claim. The live
+gate must also pass against the target environment.
 
 ## Rollback
 

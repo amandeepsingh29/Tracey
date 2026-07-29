@@ -61,7 +61,7 @@ These items block calling Tracey a production alpha.
 ### 1. Prove a clean installation
 
 - [x] Create an automated clean-machine installation test.
-- [ ] Start every required service from only documented configuration.
+- [x] Start every required service from only documented configuration.
 - [x] Apply every PostgreSQL migration to an empty database.
 - [ ] Verify startup failure messages for missing SigNoz, PostgreSQL, executor,
       and model-provider configuration.
@@ -162,7 +162,7 @@ Acceptance criteria:
 
 ### Identity and tenant security
 
-- [ ] Integrate a real OIDC identity provider.
+- [x] Integrate a real OIDC identity provider.
 - [ ] Replace the shared UI service identity with per-user sessions.
 - [ ] Enforce viewer, analyst, operator, and administrator permissions end to
       end.
@@ -262,6 +262,7 @@ Update this table only when verification evidence exists.
 
 | Date | Change | Verification |
 | --- | --- | --- |
+| 2026-07-29 | Added live OIDC and Kubernetes deployment contract verifiers | Keycloak 26.7.0 discovery, JWKS, viewer/admin authorization, and wrong-tenant rejection passed; isolated kind rollout had 5/5 ready Deployments, 11/11 running Pods, 14 migrations, a non-superuser application role, forced RLS, and CA-validated HTTPS |
 | 2026-07-29 | Added a clean-install harness, isolated runtime identities, and a non-superuser local application database role | Fresh 270-file copy installed 658 packages, applied all 14 migrations to an empty database, passed authenticated health checks, and removed its isolated runtime |
 | 2026-07-29 | Enforced tenant isolation and added OIDC role verification | Live two-tenant PostgreSQL and SigNoz-scope checks plus 63/63 API tests, including remote-JWKS issuer, audience, expiry, tenant, and role cases |
 | 2026-07-29 | Added PostgreSQL backup/restore and production manifest/release gates | Live backup into a separate database restored 14 migrations and the verification row; production render passed 26 resources, 5 hardened Deployments, and 5 network policies |

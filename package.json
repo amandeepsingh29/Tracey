@@ -28,10 +28,12 @@
     "verify:clean-install": "node scripts/verify-clean-install.mjs",
     "verify:tenant-isolation": "pnpm --filter @tracey/signoz-adapter build && node scripts/verify-tenant-isolation.mjs",
     "verify:oidc": "node scripts/verify-oidc.mjs",
+    "verify:oidc:keycloak": "pnpm --filter @tracey/api build && node scripts/verify-oidc-keycloak.mjs",
     "backup:postgres": "node scripts/postgres-backup.mjs",
     "restore:postgres": "node scripts/postgres-restore.mjs",
     "verify:backup-restore": "node scripts/verify-backup-restore.mjs",
     "verify:production": "node scripts/verify-production-deployment.mjs",
+    "verify:production:kind": "node scripts/verify-production-kind.mjs",
     "eval:capture": "node scripts/capture-evaluation.mjs",
     "eval:report": "pnpm --filter @tracey/evaluation build && node scripts/evaluate-dataset.mjs"
   },

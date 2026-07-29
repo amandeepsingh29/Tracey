@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import dotenv from "dotenv";
 import pg from "pg";
 import { buildAgentRunsQuery } from "../packages/signoz-adapter/dist/signoz-adapter.js";
 import { localApplicationDatabaseUrl } from "./tracey-runtime.mjs";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
 
@@ -163,6 +165,8 @@ try {
     investigationsIsolated: true,
     actionsIsolated: true,
   };
+  mkdirSync(resolve(".tracey/reports"), { recursive: true });
+  writeFileSync(resolve(".tracey/reports/tenant-isolation.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
 } finally {
   for (const record of records) await remove(record).catch(() => undefined);
