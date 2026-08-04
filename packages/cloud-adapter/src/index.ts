@@ -14,6 +14,20 @@ export function redactSensitiveText(value: string): string {
   return value.replace(secretPattern, "$1=[REDACTED]").slice(0, MAX_LOG_CHARACTERS);
 }
 
+export function assertKubernetesMutationScope(
+  namespace: string,
+  kind: string,
+  allowClusterScopedMutations = false,
+): void {
+  if (namespace === "*" && !allowClusterScopedMutations) {
+    throw new Error("cluster-scoped Kubernetes mutations require a separately provisioned privileged connector");
+  }
+  const protectedKinds = new Set(["Secret", "Namespace", "ServiceAccount", "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"]);
+  if (protectedKinds.has(kind)) {
+    throw new Error(`${kind} resources are identity or credential boundaries and cannot be mutated by Tracey`);
+  }
+}
+
 function labelsToSelector(labels: Record<string, string> | undefined): string {
   if (!labels || Object.keys(labels).length === 0) throw new Error("workload has no selector labels");
   return Object.entries(labels).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}=${value}`).join(",");
@@ -30,6 +44,7 @@ export interface PodStatus {
 export interface KubernetesAdapterOptions {
   allowedNamespaces?: string[];
   allowedWorkloads?: string[];
+  allowClusterScopedMutations?: boolean;
 }
 
 export interface KubernetesDeploymentSummary {
@@ -66,6 +81,7 @@ export class KubernetesAdapter {
   private readonly objects: k8s.KubernetesObjectApi;
   private readonly allowedNamespaces: Set<string> | undefined;
   private readonly allowedWorkloads: Set<string> | undefined;
+  private readonly allowClusterScopedMutations: boolean;
 
   constructor(options: KubernetesAdapterOptions = {}) {
     const config = new k8s.KubeConfig();
@@ -80,6 +96,7 @@ export class KubernetesAdapter {
     this.objects = k8s.KubernetesObjectApi.makeApiClient(config);
     this.allowedNamespaces = buildScope(options.allowedNamespaces);
     this.allowedWorkloads = buildScope(options.allowedWorkloads);
+    this.allowClusterScopedMutations = options.allowClusterScopedMutations ?? false;
   }
 
   private validateTarget(namespace: string, workload?: string): void {
@@ -423,7 +440,10 @@ export class KubernetesAdapter {
 
   async execute(actionInput: CloudAction): Promise<Record<string, unknown>> {
     const action = CloudActionSchema.parse(actionInput);
-    this.validateTarget(action.namespace, action.workload);
+    const isGenericMutation = action.type === "apply_kubernetes_resource"
+      || action.type === "patch_kubernetes_resource"
+      || action.type === "delete_kubernetes_resource";
+    if (!isGenericMutation) this.validateTarget(action.namespace, action.workload);
     switch (action.type) {
       case "restart_pod":
         return this.restartPod(action.namespace, action.workload);
@@ -482,18 +502,26 @@ export class KubernetesAdapter {
   }
 
   private validateGenericTarget(namespace: string, workload: string, kind: string): void {
-    this.validateTarget(namespace === "*" ? "default" : namespace, workload);
-    const protectedKinds = new Set(["Secret", "Namespace", "ServiceAccount", "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"]);
-    if (protectedKinds.has(kind)) throw new Error(`${kind} resources are identity or credential boundaries and cannot be mutated by Tracey`);
+    assertKubernetesMutationScope(namespace, kind, this.allowClusterScopedMutations);
+    if (namespace === "*") {
+      KubernetesNameSchema.parse(workload);
+      if (this.allowedWorkloads && !this.allowedWorkloads.has(workload)) {
+        throw new Error(`workload ${workload} is outside the executor scope`);
+      }
+    } else {
+      this.validateTarget(namespace, workload);
+    }
   }
 
-  private objectHeader(input: { apiVersion: string; kind: string; namespace: string; workload: string }): k8s.KubernetesObject & { metadata: { name: string; namespace: string } } {
+  private objectHeader(input: { apiVersion: string; kind: string; namespace: string; workload: string }): k8s.KubernetesObject & {
+    metadata: { name: string; namespace: string };
+  } {
     return {
       apiVersion: input.apiVersion,
       kind: input.kind,
       metadata: {
         name: input.workload,
-        namespace: input.namespace === "*" ? "default" : input.namespace,
+        namespace: input.namespace === "*" ? "" : input.namespace,
       },
     };
   }

@@ -7,11 +7,11 @@ import { titleCase } from "../lib/format";
 
 export function StatusChip({ value }: { value: string }) {
   const normalized = value.toLowerCase();
-  const tone = ["ready", "active", "succeeded", "executed", "healthy", "evidence_bound"].includes(normalized)
+  const tone = ["ready", "active", "verified", "completed", "succeeded", "executed", "healthy", "evidence_bound"].includes(normalized)
     ? "success"
-    : ["failed", "critical", "rejected", "revert_failed", "unhealthy"].includes(normalized)
+    : ["failed", "critical", "high", "rejected", "revert_failed", "unhealthy"].includes(normalized)
       ? "danger"
-      : ["awaiting_approval", "warning", "needs_configuration", "verifying", "executing", "reverting"].includes(normalized)
+      : ["medium", "queued", "running", "pending_verification", "awaiting_approval", "warning", "needs_configuration", "verifying", "executing", "reverting"].includes(normalized)
         ? "warning"
         : "neutral";
   return <span className={`status-chip status-${tone}`}><span aria-hidden="true" />{titleCase(value)}</span>;

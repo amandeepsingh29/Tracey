@@ -413,3 +413,52 @@ export type IncidentEvent = {
   details: Record<string, unknown>;
   createdAt: string;
 };
+
+export type WebsiteTarget = {
+  targetId: string;
+  origin: string;
+  status: "pending_verification" | "verified" | "disabled";
+  verifiedAt?: string;
+  verifiedBy?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WebsiteFinding = {
+  findingId: string;
+  title: string;
+  severity: "info" | "low" | "medium" | "high";
+  category: "transport" | "headers" | "cookies" | "cors" | "content" | "information_exposure";
+  evidence: string;
+  remediation: string;
+  standard: string;
+};
+
+export type WebsiteScanResult = {
+  origin: string;
+  scannedAt: string;
+  statusCode: number;
+  finalUrl: string;
+  contentType?: string;
+  responseBytes: number;
+  bodySha256: string;
+  tls?: { protocol?: string; validTo?: string; issuer?: string };
+  findings: WebsiteFinding[];
+  summary: Record<WebsiteFinding["severity"], number>;
+  scope: { requestsMade: number; methods: ["GET"]; activePayloads: false; sameOriginOnly: true };
+};
+
+export type WebsiteScan = {
+  scanId: string;
+  targetId: string;
+  jobId: string;
+  status: "queued" | "running" | "completed" | "failed";
+  requestedBy: string;
+  result?: WebsiteScanResult;
+  errorType?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};

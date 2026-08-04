@@ -67,9 +67,23 @@ export class ApprovedActionExecutor {
 
   async checkReadiness(): Promise<void> {
     const namespace = this.config.allowedNamespaces?.[0];
-    if (!this.investigator && !this.kubernetes) return;
-    if (!namespace) throw new Error("Kubernetes connector scope is empty");
-    await (this.investigator ?? this.kubernetes)!.checkAccess(namespace);
+    if (this.investigator || this.kubernetes) {
+      if (!namespace) throw new Error("Kubernetes connector scope is empty");
+      await (this.investigator ?? this.kubernetes)!.checkAccess(namespace);
+    }
+    if (this.config.executorUrl) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), Math.min(this.config.timeoutMs ?? 5_000, 5_000));
+      try {
+        const response = await fetch(`${this.config.executorUrl.replace(/\/$/, "")}/ready`, {
+          signal: controller.signal,
+          headers: this.config.executorToken ? { authorization: `Bearer ${this.config.executorToken}` } : {},
+        });
+        if (!response.ok) throw new Error(`Restricted executor readiness returned HTTP ${response.status}`);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
   }
 
   async execute(proposal: ActionProposal): Promise<ActionExecutionResult> {

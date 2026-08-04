@@ -2,7 +2,7 @@
 
 import {
   Activity, Bot, Cable, ChevronRight, CircleGauge, Command, FileSearch,
-  GitPullRequestArrow, Menu, PanelLeftClose, PanelLeftOpen, Search, Settings,
+  GitPullRequestArrow, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldCheck,
   X,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -17,14 +17,17 @@ const navigation = [
   { href: "/runs", label: "Runs", icon: Activity },
   { href: "/investigations", label: "Investigate", icon: FileSearch },
   { href: "/agents", label: "Agents", icon: Bot },
+  { href: "/security", label: "Website security", icon: ShieldCheck },
   { href: "/connectors", label: "Connectors", icon: Cable },
   { href: "/changes", label: "Changes", icon: GitPullRequestArrow },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
-const labels: Record<string, string> = { agents: "Agents", runs: "Runs", incidents: "Incidents", investigations: "Investigations", changes: "Changes", connectors: "Connectors", policies: "Policies", notifs: "Notifications", notifications: "Notifications", settings: "Settings", onboarding: "Get started" };
+const labels: Record<string, string> = { agents: "Agents", runs: "Runs", security: "Website security", incidents: "Incidents", investigations: "Investigations", changes: "Changes", connectors: "Connectors", policies: "Policies", notifs: "Notifications", notifications: "Notifications", settings: "Settings", onboarding: "Get started" };
 
-export function Shell({ children }: PropsWithChildren) {
+export function Shell({ children, user }: PropsWithChildren<{
+  user?: { subject: string; name?: string; email?: string; roles: string[] };
+}>) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -57,7 +60,10 @@ export function Shell({ children }: PropsWithChildren) {
     <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
       <div className="brand"><div className="brand-mark" aria-hidden="true"><Image src="/crumbles-logo.png" alt="" width={38} height={39} priority /></div><div><strong>Tracey</strong><span>Reliability control plane</span></div><button className="sidebar-collapse-button" onClick={toggleSidebar} aria-label={sidebarCollapsed ? "Expand sidebar" : "Minimize sidebar"} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? "Expand sidebar" : "Minimize sidebar"}>{sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-button mobile-only" onClick={() => setMobileOpen(false)} aria-label="Close navigation"><X /></button></div>
       <nav aria-label="Primary navigation">{navigation.map(({ href, label, icon: Icon }) => { const active = href === "/" ? pathname === "/" : pathname.startsWith(href); return <Link key={href} href={href} className={active ? "active" : ""} title={sidebarCollapsed ? label : undefined} aria-label={sidebarCollapsed ? label : undefined} onClick={() => setMobileOpen(false)}><Icon size={18} aria-hidden="true" /><span>{label}</span></Link>; })}</nav>
-      <div className="sidebar-footer"><div className="environment-dot"><span />System connected</div><p>Approval-first operations</p></div>
+      <div className="sidebar-footer">
+        {user && <div className="signed-in-user"><span><strong>{user.name ?? user.email ?? user.subject}</strong><small>{user.roles.join(" · ") || "Signed in"}</small></span><a href="/api/auth/logout" aria-label="Sign out" title="Sign out"><LogOut size={16} /></a></div>}
+        <div className="environment-dot"><span />System connected</div><p>Approval-first operations</p>
+      </div>
     </aside>
     {mobileOpen && <button className="sidebar-scrim" onClick={() => setMobileOpen(false)} aria-label="Close navigation" />}
     <div className="workspace">

@@ -19,15 +19,28 @@ esac
 : "${TRACEY_TENANT_ID:?Set TRACEY_TENANT_ID}"
 : "${DEPLOYMENT_ENVIRONMENT:?Set DEPLOYMENT_ENVIRONMENT}"
 
-for env_file in "${TRACEY_API_ENV_FILE}" "${TRACEY_EXECUTOR_ENV_FILE}"; do
+if [[ "${profile}" != local ]]; then
+  : "${TRACEY_UI_ENV_FILE:?Set TRACEY_UI_ENV_FILE for per-user OIDC web sessions}"
+fi
+
+for env_file in "${TRACEY_API_ENV_FILE}" "${TRACEY_EXECUTOR_ENV_FILE}" ${TRACEY_UI_ENV_FILE:+"${TRACEY_UI_ENV_FILE}"}; do
   test -f "${env_file}" || { echo "Environment file does not exist: ${env_file}" >&2; exit 1; }
 done
 
-ui_access_token="$(awk -F= '$1 == "TRACEY_UI_ACCESS_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "${TRACEY_API_ENV_FILE}")"
-if [[ -z "${ui_access_token}" ]]; then
-  ui_access_token="$(awk -F= '$1 == "TRACEY_API_BEARER_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "${TRACEY_API_ENV_FILE}")"
+if [[ "${profile}" != local ]]; then
+  grep -q '^TRACEY_WEB_AUTH_MODE=oidc$' "${TRACEY_UI_ENV_FILE}" || {
+    echo "TRACEY_UI_ENV_FILE must set TRACEY_WEB_AUTH_MODE=oidc for staging and production" >&2
+    exit 1
+  }
+  grep -q '^TRACEY_WEB_OIDC_CLIENT_ID=.' "${TRACEY_UI_ENV_FILE}" || {
+    echo "TRACEY_UI_ENV_FILE must set TRACEY_WEB_OIDC_CLIENT_ID" >&2
+    exit 1
+  }
+  grep -Eq '^TRACEY_WEB_SESSION_SECRET=.{32,}$' "${TRACEY_UI_ENV_FILE}" || {
+    echo "TRACEY_UI_ENV_FILE must set TRACEY_WEB_SESSION_SECRET with at least 32 characters" >&2
+    exit 1
+  }
 fi
-[[ -n "${ui_access_token}" ]] || { echo "TRACEY_UI_ACCESS_TOKEN or TRACEY_API_BEARER_TOKEN is required in TRACEY_API_ENV_FILE" >&2; exit 1; }
 
 kubectl create namespace "${namespace}" --dry-run=client --output yaml | kubectl apply --filename -
 
@@ -62,9 +75,21 @@ fi
 
 kubectl create secret generic tracey-api-env --from-env-file="${TRACEY_API_ENV_FILE}" --namespace "${namespace}" --dry-run=client --output yaml | kubectl apply --filename -
 kubectl create secret generic tracey-executor-env --from-env-file="${TRACEY_EXECUTOR_ENV_FILE}" --namespace "${namespace}" --dry-run=client --output yaml | kubectl apply --filename -
-kubectl create secret generic tracey-ui-env \
-  --from-literal=TRACEY_UI_ACCESS_TOKEN="${ui_access_token}" \
-  --namespace "${namespace}" --dry-run=client --output yaml | kubectl apply --filename -
+if [[ -n "${TRACEY_UI_ENV_FILE:-}" ]]; then
+  kubectl create secret generic tracey-ui-env \
+    --from-env-file="${TRACEY_UI_ENV_FILE}" \
+    --namespace "${namespace}" --dry-run=client --output yaml | kubectl apply --filename -
+else
+  ui_access_token="$(awk -F= '$1 == "TRACEY_UI_ACCESS_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "${TRACEY_API_ENV_FILE}")"
+  if [[ -z "${ui_access_token}" ]]; then
+    ui_access_token="$(awk -F= '$1 == "TRACEY_API_BEARER_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "${TRACEY_API_ENV_FILE}")"
+  fi
+  [[ -n "${ui_access_token}" ]] || { echo "Local profile requires TRACEY_UI_ACCESS_TOKEN or TRACEY_API_BEARER_TOKEN" >&2; exit 1; }
+  kubectl create secret generic tracey-ui-env \
+    --from-literal=TRACEY_WEB_AUTH_MODE=local \
+    --from-literal=TRACEY_UI_ACCESS_TOKEN="${ui_access_token}" \
+    --namespace "${namespace}" --dry-run=client --output yaml | kubectl apply --filename -
+fi
 kubectl create secret generic signoz-secret \
   --from-literal=SIGNOZ_OTLP_ENDPOINT="${SIGNOZ_OTLP_ENDPOINT}" \
   --from-literal=SIGNOZ_INGESTION_KEY="${SIGNOZ_INGESTION_KEY}" \

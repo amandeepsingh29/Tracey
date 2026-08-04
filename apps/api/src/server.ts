@@ -38,6 +38,7 @@ import { listRecentCodexForensicTurns, readCodexForensicTurn } from "./codex-for
 import { buildCodexExecutionGraph, buildLocalCodexExecutionGraph } from "./execution-graph.js";
 import { AgentSetupRequestSchema, generateAgentSetup } from "./agent-setup.js";
 import { KubernetesAdapter } from "@tracey/cloud-adapter";
+import { WebsiteScanner, normalizeWebsiteOrigin } from "@tracey/website-scanner";
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -66,6 +67,7 @@ export function buildServer(config: AppConfig) {
         "req.headers.signoz-api-key",
         "req.body.input",
         "req.body.arguments",
+        "req.body.token",
       ],
     },
     bodyLimit: 64 * 1_024,
@@ -132,6 +134,7 @@ export function buildServer(config: AppConfig) {
         statementTimeoutMs: config.POSTGRES_STATEMENT_TIMEOUT_MS,
       })
     : undefined;
+  const websiteScanner = new WebsiteScanner();
   let autonomy = store
     ? new AutonomyService(config.TRACEY_TENANT_ID, config.DEPLOYMENT_ENVIRONMENT, store, actionExecutor)
     : undefined;
@@ -322,10 +325,39 @@ export function buildServer(config: AppConfig) {
     await Promise.all([mcpClient?.close(), traceyMcp?.close(), store?.close()]);
   });
 
+  server.get("/live", async () => ({ status: "alive", component: "tracey-api" }));
+  server.get("/ready", async (_request, reply) => {
+    const dependencies: Record<string, "ready" | "unavailable" | "not_configured"> = {
+      authentication: config.TRACEY_API_BEARER_TOKEN || (config.OIDC_ISSUER_URL && config.OIDC_JWKS_URL && config.OIDC_AUDIENCE)
+        ? "ready"
+        : "not_configured",
+      postgres: store ? "ready" : "not_configured",
+      executor: actionExecutor.configured() ? "ready" : "not_configured",
+    };
+    if (store) {
+      try {
+        await store.checkHealth();
+      } catch {
+        dependencies.postgres = "unavailable";
+      }
+    }
+    if (actionExecutor.configured()) {
+      try {
+        await actionExecutor.checkReadiness();
+      } catch {
+        dependencies.executor = "unavailable";
+      }
+    }
+    const required = [dependencies.authentication, dependencies.postgres, ...(actionExecutor.configured() ? [dependencies.executor] : [])];
+    if (required.some((state) => state !== "ready")) {
+      return reply.code(503).send({ status: "not_ready", dependencies });
+    }
+    return { status: "ready", dependencies };
+  });
   server.get("/health", async () => ({
-    status: "ok",
+    status: "alive",
     integrations: {
-      apiAuthentication: config.TRACEY_API_BEARER_TOKEN ? "configured" : "not_configured",
+      apiAuthentication: config.TRACEY_API_BEARER_TOKEN || config.OIDC_ISSUER_URL ? "configured" : "not_configured",
       signozQueryApi: signoz ? "configured" : "not_configured",
       metadataStore: store ? "configured" : "not_configured",
       agenticInvestigator: agentic ? "configured" : "not_configured",
@@ -389,6 +421,83 @@ export function buildServer(config: AppConfig) {
     if (!deleted) return reply.code(404).send({ error: "Connector configuration not found" });
     if (id.data === "signoz") { signoz = undefined; rebuildRuntime(); }
     return reply.code(204).send();
+  });
+
+  server.post("/v1/security/website-targets", { preHandler: adminAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for website security targets" });
+    const parsed = z.object({ url: z.string().url().max(2_048) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "A valid HTTPS website URL is required" });
+    try {
+      const origin = normalizeWebsiteOrigin(parsed.data.url).origin;
+      const created = await store.createWebsiteTarget(config.TRACEY_TENANT_ID, origin, request.authContext!.subject);
+      return reply.code(created.verificationToken ? 201 : 200).send({
+        target: created.target,
+        ...(created.verificationToken ? { verification: {
+          path: "/.well-known/tracey-verification.txt",
+          content: created.verificationToken,
+          instructions: "Publish this exact content at the verification path, then verify ownership in Tracey.",
+        } } : {}),
+      });
+    } catch (error) {
+      return reply.code(422).send({ error: error instanceof Error ? error.message : "Website target could not be created" });
+    }
+  });
+
+  server.get("/v1/security/website-targets", { preHandler: apiAuth }, async (_request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for website security targets" });
+    return { targets: await store.listWebsiteTargets(config.TRACEY_TENANT_ID) };
+  });
+
+  server.post("/v1/security/website-targets/:targetId/verify", { preHandler: adminAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for website ownership verification" });
+    const parsed = z.object({ targetId: z.string().uuid(), token: z.string().min(32).max(256) }).safeParse({
+      ...(request.params as Record<string, unknown>),
+      ...(request.body as Record<string, unknown>),
+    });
+    if (!parsed.success) return reply.code(400).send({ error: "A valid target and verification token are required" });
+    const target = await store.getWebsiteTarget(config.TRACEY_TENANT_ID, parsed.data.targetId);
+    if (!target) return reply.code(404).send({ error: "Website target not found" });
+    try {
+      await websiteScanner.verifyOwnership(target.origin, parsed.data.token);
+      const verified = await store.verifyWebsiteTargetToken(
+        config.TRACEY_TENANT_ID,
+        target.targetId,
+        parsed.data.token,
+        request.authContext!.subject,
+      );
+      return { target: verified };
+    } catch (error) {
+      request.log.warn({ targetId: target.targetId, errorType: error instanceof Error ? error.name : "UnknownError" }, "Website ownership verification failed");
+      return reply.code(422).send({ error: error instanceof Error ? error.message : "Website ownership verification failed" });
+    }
+  });
+
+  server.post("/v1/security/website-targets/:targetId/scans", { preHandler: operatorAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for website security scans" });
+    const targetId = z.string().uuid().safeParse((request.params as { targetId?: string }).targetId);
+    if (!targetId.success) return reply.code(400).send({ error: "Invalid website target ID" });
+    try {
+      const scan = await store.createWebsiteScan(config.TRACEY_TENANT_ID, targetId.data, request.authContext!.subject);
+      if (!scan) return reply.code(404).send({ error: "Website target not found" });
+      return reply.code(202).send({ scan });
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : "Website scan could not be queued" });
+    }
+  });
+
+  server.get("/v1/security/website-scans", { preHandler: apiAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for website security scans" });
+    const parsed = z.object({ targetId: z.string().uuid().optional() }).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid website scan query" });
+    return { scans: await store.listWebsiteScans(config.TRACEY_TENANT_ID, parsed.data.targetId) };
+  });
+
+  server.get("/v1/security/website-scans/:scanId", { preHandler: apiAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for website security scans" });
+    const scanId = z.string().uuid().safeParse((request.params as { scanId?: string }).scanId);
+    if (!scanId.success) return reply.code(400).send({ error: "Invalid website scan ID" });
+    const scan = await store.getWebsiteScan(config.TRACEY_TENANT_ID, scanId.data);
+    return scan ? { scan } : reply.code(404).send({ error: "Website scan not found" });
   });
 
   server.post("/v1/investigations", { preHandler: analystAuth }, async (request, reply) => {

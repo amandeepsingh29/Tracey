@@ -42,9 +42,14 @@ describe("integration configuration gates", () => {
   it("reports integration readiness without exposing secrets", async () => {
     const server = buildServer(config);
     const response = await server.inject({ method: "GET", url: "/health" });
+    const live = await server.inject({ method: "GET", url: "/live" });
+    const ready = await server.inject({ method: "GET", url: "/ready" });
     await server.close();
 
     assert.equal(response.statusCode, 200);
+    assert.equal(live.statusCode, 200);
+    assert.equal(ready.statusCode, 503);
+    assert.equal(ready.json().dependencies.postgres, "not_configured");
     assert.deepEqual(response.json().integrations, {
       apiAuthentication: "configured",
       signozQueryApi: "not_configured",
@@ -158,6 +163,26 @@ describe("integration configuration gates", () => {
     assert.equal(notifications.statusCode, 503);
     assert.equal(clearInvestigations.statusCode, 503);
     assert.match(clearInvestigations.json().error, /DATABASE_URL/);
+  });
+
+  it("keeps website security targets authenticated and refuses in-memory scan state", async () => {
+    const server = buildServer(config);
+    const unauthorized = await server.inject({ method: "GET", url: "/v1/security/website-targets" });
+    const targets = await server.inject({ method: "GET", url: "/v1/security/website-targets", headers: apiHeaders });
+    const create = await server.inject({
+      method: "POST",
+      url: "/v1/security/website-targets",
+      headers: apiHeaders,
+      payload: { url: "https://example.com" },
+    });
+    const scans = await server.inject({ method: "GET", url: "/v1/security/website-scans", headers: apiHeaders });
+    await server.close();
+
+    assert.equal(unauthorized.statusCode, 401);
+    assert.equal(targets.statusCode, 503);
+    assert.match(targets.json().error, /DATABASE_URL/);
+    assert.equal(create.statusCode, 503);
+    assert.equal(scans.statusCode, 503);
   });
 
   it("tests SigNoz query permissions and reports credential failures without echoing secrets", async () => {

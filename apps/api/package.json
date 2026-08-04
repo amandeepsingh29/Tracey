@@ -24,6 +24,7 @@
     "@tracey/pricing": "workspace:*",
     "@tracey/signoz-adapter": "workspace:*",
     "@tracey/telemetry": "workspace:*",
+    "@tracey/website-scanner": "workspace:*",
     "@tracey/cloud-adapter": "workspace:*",
     "@tracey/connectors": "workspace:*",
     "dotenv": "^17.2.1",

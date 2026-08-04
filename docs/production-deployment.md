@@ -16,12 +16,16 @@ digest with GitHub's OIDC identity. A release tag must match the image tag in
 
 1. Provision PostgreSQL outside the cluster and enable encrypted connections,
    automated backups, point-in-time recovery, and deletion protection.
-2. Create the API and executor environment files outside the repository. Use a
+2. Create the API, executor, and UI environment files outside the repository. Use a
    migration-capable database identity only for the migration image and the
    non-superuser application identity for runtime services.
 3. Configure an ingress controller, a real DNS name, and a trusted TLS
    certificate for `tracey-ui-service`. Do not expose the executor service.
 4. Set an OIDC issuer, audience, and fixed tenant claim in the API environment.
+   Configure the UI file with `TRACEY_WEB_AUTH_MODE=oidc`, the same issuer, its
+   OIDC client ID, public HTTPS URL, and an independently generated
+   `TRACEY_WEB_SESSION_SECRET` of at least 32 characters. Add the exact
+   `/api/auth/callback` URL to the IdP client's redirect allowlist.
 5. Pin the production overlay to the release tag and verify the signed image
    digests before deployment.
 
@@ -34,7 +38,8 @@ digests until the release is verified.
 
 Use `scripts/deploy-k8s.sh` to create runtime secrets, apply the chosen overlay,
 and wait for every rollout. The script deliberately requires all configuration
-instead of supplying production defaults.
+instead of supplying production defaults. Staging and production require
+`TRACEY_UI_ENV_FILE`; only the local profile permits a shared UI token.
 
 ## Verification
 

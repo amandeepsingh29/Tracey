@@ -3,6 +3,7 @@ import type {
   InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
   Incident, IncidentEvent, IncidentStatus, ExecutionFeed, KubernetesDeploymentSummary,
   CodexExecutionGraph, RecentCodexConversations,
+  WebsiteScan, WebsiteTarget,
 } from "../types";
 
 export class ApiError extends Error {
@@ -77,4 +78,10 @@ export const api = {
   incident: (incidentId: string) => request<{ incident: Incident; events: IncidentEvent[] }>(`/v1/incidents/${incidentId}`),
   createIncident: (input: Pick<Incident, "title" | "summary" | "severity" | "environment" | "affectedAgentIds">) => request<Incident>("/v1/incidents", { method: "POST", body: JSON.stringify(input) }),
   updateIncident: (incidentId: string, input: { status?: IncidentStatus; owner?: string | null; note?: string; investigationSessionId?: string }) => request<Incident>(`/v1/incidents/${incidentId}`, { method: "PATCH", body: JSON.stringify(input) }),
+  websiteTargets: () => request<{ targets: WebsiteTarget[] }>("/v1/security/website-targets"),
+  createWebsiteTarget: (url: string) => request<{ target: WebsiteTarget; verification?: { path: string; content: string; instructions: string } }>("/v1/security/website-targets", { method: "POST", body: JSON.stringify({ url }) }),
+  verifyWebsiteTarget: (targetId: string, token: string) => request<{ target: WebsiteTarget }>(`/v1/security/website-targets/${targetId}/verify`, { method: "POST", body: JSON.stringify({ token }) }),
+  websiteScans: (targetId?: string) => request<{ scans: WebsiteScan[] }>(`/v1/security/website-scans?${query({ targetId })}`),
+  websiteScan: (scanId: string) => request<{ scan: WebsiteScan }>(`/v1/security/website-scans/${scanId}`),
+  createWebsiteScan: (targetId: string) => request<{ scan: WebsiteScan }>(`/v1/security/website-targets/${targetId}/scans`, { method: "POST", body: "{}" }),
 };

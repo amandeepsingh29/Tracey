@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { CloudActionSchema } from "@tracey/autonomy";
 import { KubernetesAdapter } from "@tracey/cloud-adapter";
 import { PostgresStore } from "@tracey/postgres-store";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 
 export interface ExecutorConfig {
@@ -11,6 +11,7 @@ export interface ExecutorConfig {
   databaseUrl: string;
   allowedNamespaces: string[];
   allowedWorkloads: string[];
+  allowClusterScopedMutations?: boolean;
 }
 
 function tokenMatches(header: string | undefined, expected: string): boolean {
@@ -29,32 +30,47 @@ export function buildExecutorServer(config: ExecutorConfig, dependencies?: {
   const kubernetes = dependencies?.kubernetes ?? new KubernetesAdapter({
     allowedNamespaces: config.allowedNamespaces,
     allowedWorkloads: config.allowedWorkloads,
+    allowClusterScopedMutations: config.allowClusterScopedMutations ?? false,
   });
 
   server.addHook("onClose", async () => {
     if (!dependencies?.store) await store.close();
   });
-  server.get("/health", async (_request, reply) => {
+  server.get("/live", async () => ({ status: "alive", component: "tracey-executor" }));
+  const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
       await store.checkHealth();
       const namespace = config.allowedNamespaces[0];
       if (!namespace) return reply.code(503).send({ status: "not_ready", reason: "executor namespace scope is empty" });
       await kubernetes.checkMutationAccess(namespace);
-      return { status: "ready" };
+      return { status: "ready", dependencies: { postgres: "ready", kubernetes: "ready" } };
     } catch {
-      return reply.code(503).send({ status: "not_ready" });
+      return reply.code(503).send({ status: "not_ready", dependencies: { postgresOrKubernetes: "unavailable" } });
     }
-  });
+  };
+  server.get("/ready", readiness);
+  server.get("/health", readiness);
   server.post("/v1/actions/execute", async (request, reply) => {
     if (!tokenMatches(request.headers.authorization, config.bearerToken)) return reply.code(401).send({ error: "Valid executor authentication is required" });
     const parsed = z.object({ proposalId: z.string().uuid(), action: CloudActionSchema }).safeParse(request.body);
     const idempotencyKey = z.string().min(1).max(255).safeParse(request.headers["idempotency-key"]);
     if (!parsed.success || !idempotencyKey.success) return reply.code(400).send({ error: "A valid typed action and idempotency key are required" });
-    const claim = await store.claimExecutorAction(config.tenantId, {
-      idempotencyKey: idempotencyKey.data,
-      proposalId: parsed.data.proposalId,
-      action: parsed.data.action,
-    });
+    let claim;
+    try {
+      claim = await store.claimExecutorAction(config.tenantId, {
+        idempotencyKey: idempotencyKey.data,
+        proposalId: parsed.data.proposalId,
+        action: parsed.data.action,
+      });
+    } catch (error) {
+      request.log.warn({
+        errorType: error instanceof Error ? error.name : "UnknownError",
+        proposalId: parsed.data.proposalId,
+      }, "Executor authorization rejected");
+      return reply.code(409).send({
+        error: "The persisted proposal, approval, tenant, idempotency key, and exact action could not be authorized",
+      });
+    }
     if (!claim.claimed) {
       if (claim.status === "executing") return reply.code(409).send({ error: "Action is already executing" });
       return { status: claim.status, result: claim.result, replayed: true };

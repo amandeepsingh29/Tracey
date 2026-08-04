@@ -14,10 +14,10 @@ const logDir = join(runtimeDir, "logs");
 const statePath = join(runtimeDir, "runtime.json");
 const envPath = join(repoDir, ".env");
 const serviceSpecs = {
-  api: { packageName: "@tracey/api", portKey: "PORT", defaultPort: 3000, healthPath: "/health" },
-  worker: { packageName: "@tracey/worker", portKey: "WORKER_HEALTH_PORT", defaultPort: 3001, healthPath: "/" },
-  executor: { packageName: "@tracey/executor", portKey: "EXECUTOR_PORT", defaultPort: 3002, healthPath: "/health" },
-  web: { packageName: "@tracey/web", portKey: "TRACEY_WEB_PORT", defaultPort: 8501, healthPath: "/healthz" },
+  api: { packageName: "@tracey/api", portKey: "PORT", defaultPort: 3000, healthPath: "/ready" },
+  worker: { packageName: "@tracey/worker", portKey: "WORKER_HEALTH_PORT", defaultPort: 3001, healthPath: "/ready" },
+  executor: { packageName: "@tracey/executor", portKey: "EXECUTOR_PORT", defaultPort: 3002, healthPath: "/ready" },
+  web: { packageName: "@tracey/web", portKey: "TRACEY_WEB_PORT", defaultPort: 8501, healthPath: "/readyz" },
 };
 
 export function parsePort(value, fallback) {

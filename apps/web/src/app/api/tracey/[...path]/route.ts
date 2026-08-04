@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  accessTokenForRequest,
+  setSessionCookie,
+  webAuthConfig,
+} from "../../../../server/oidc";
 
 export const dynamic = "force-dynamic";
 const methodsWithBody = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -8,7 +13,22 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   // Kubernetes and other deployments set TRACEY_API_URL explicitly. Falling
   // back to loopback keeps a local production build connected after restart.
   const baseUrl = (process.env.TRACEY_API_URL ?? "http://127.0.0.1:3000").replace(/\/$/, "");
-  const accessToken = process.env.TRACEY_UI_ACCESS_TOKEN ?? process.env.TRACEY_API_BEARER_TOKEN;
+  const authConfig = webAuthConfig();
+  let auth;
+  try {
+    auth = await accessTokenForRequest(request, authConfig);
+  } catch {
+    return NextResponse.json(
+      { error: "Your Tracey session has expired", loginUrl: `/api/auth/login?returnTo=${encodeURIComponent(request.nextUrl.pathname)}` },
+      { status: 401 },
+    );
+  }
+  if (authConfig.mode === "oidc" && !auth.accessToken) {
+    return NextResponse.json(
+      { error: "Sign in to access Tracey", loginUrl: `/api/auth/login?returnTo=${encodeURIComponent(request.nextUrl.pathname)}` },
+      { status: 401 },
+    );
+  }
   const target = new URL(`${baseUrl}/${path.join("/")}`);
   request.nextUrl.searchParams.forEach((value, key) => target.searchParams.append(key, value));
   const controller = new AbortController();
@@ -26,14 +46,18 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
       headers: {
         accept: request.headers.get("accept") ?? "application/json",
         ...(hasBody ? { "content-type": request.headers.get("content-type") ?? "application/json" } : {}),
-        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
+        ...(auth.accessToken ? { authorization: `Bearer ${auth.accessToken}` } : {}),
       },
       ...(hasBody ? { body } : {}),
     });
-    return new NextResponse(response.body, {
+    const proxied = new NextResponse(response.body, {
       status: response.status,
       headers: { "content-type": response.headers.get("content-type") ?? "application/json; charset=utf-8", "cache-control": "no-store" },
     });
+    if (auth.rotatedCookie && auth.session) {
+      setSessionCookie(proxied, request, authConfig, auth.rotatedCookie, auth.session);
+    }
+    return proxied;
   } catch (error) {
     return NextResponse.json({ error: "Tracey API is currently unreachable", retryable: true, errorType: error instanceof Error ? error.name : "UnknownError" }, { status: 502 });
   } finally { clearTimeout(timeout); }

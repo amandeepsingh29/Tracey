@@ -8,6 +8,7 @@ const environment = z.object({
   DATABASE_URL: z.string().url(),
   TRACEY_KUBERNETES_ALLOWED_NAMESPACES: z.string().min(1),
   TRACEY_KUBERNETES_ALLOWED_WORKLOADS: z.string().min(1),
+  TRACEY_KUBERNETES_ALLOW_CLUSTER_SCOPED_MUTATIONS: z.enum(["true", "false"]).default("false"),
 }).parse(process.env);
 
 const server = buildExecutorServer({
@@ -16,6 +17,7 @@ const server = buildExecutorServer({
   databaseUrl: environment.DATABASE_URL,
   allowedNamespaces: environment.TRACEY_KUBERNETES_ALLOWED_NAMESPACES.split(",").map((value) => value.trim()).filter(Boolean),
   allowedWorkloads: environment.TRACEY_KUBERNETES_ALLOWED_WORKLOADS.split(",").map((value) => value.trim()).filter(Boolean),
+  allowClusterScopedMutations: environment.TRACEY_KUBERNETES_ALLOW_CLUSTER_SCOPED_MUTATIONS === "true",
 });
 
 await server.listen({ host: "0.0.0.0", port: environment.EXECUTOR_PORT });

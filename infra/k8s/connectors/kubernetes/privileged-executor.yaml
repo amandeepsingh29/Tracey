@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tracey-privileged-executor
+  namespace: __TRACEY_NAMESPACE__
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracey-privileged-executor
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints", "limitranges", "nodes", "persistentvolumeclaims", "persistentvolumes", "pods", "resourcequotas", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["apps", "batch", "autoscaling", "networking.k8s.io", "policy", "storage.k8s.io", "coordination.k8s.io", "discovery.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracey-privileged-executor
+subjects:
+  - kind: ServiceAccount
+    name: tracey-privileged-executor
+    namespace: __TRACEY_NAMESPACE__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracey-privileged-executor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracey-privileged-executor
+  namespace: __TRACEY_NAMESPACE__
+  labels:
+    app: tracey-privileged-executor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tracey-privileged-executor
+  template:
+    metadata:
+      labels:
+        app: tracey-privileged-executor
+        app.kubernetes.io/part-of: tracey
+    spec:
+      serviceAccountName: tracey-privileged-executor
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: executor
+          image: __EXECUTOR_IMAGE__
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - secretRef:
+                name: tracey-executor-env
+          env:
+            - name: EXECUTOR_PORT
+              value: "3002"
+            - name: TRACEY_KUBERNETES_ALLOWED_NAMESPACES
+              value: "*"
+            - name: TRACEY_KUBERNETES_ALLOWED_WORKLOADS
+              value: "*"
+            - name: TRACEY_KUBERNETES_ALLOW_CLUSTER_SCOPED_MUTATIONS
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 3002
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracey-privileged-executor-service
+  namespace: __TRACEY_NAMESPACE__
+spec:
+  selector:
+    app: tracey-privileged-executor
+  ports:
+    - name: http
+      port: 3002
+      targetPort: http

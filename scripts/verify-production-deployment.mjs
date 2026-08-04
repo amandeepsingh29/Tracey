@@ -89,6 +89,30 @@ function verifyStaticManifest() {
       assert.ok(!(rule.resources ?? []).includes("secrets"), `${role.metadata.name} must not read or mutate Kubernetes Secrets`);
     }
   }
+  assert.ok(
+    !clusterRoles.some(({ metadata }) => metadata.name === "tracey-executor"),
+    "the default executor must not have a ClusterRole",
+  );
+  const executorRole = resources.find(
+    ({ kind, metadata }) => kind === "Role" && metadata.name === "tracey-executor",
+  );
+  assert.ok(executorRole, "the default executor needs a namespace-scoped Role");
+  const forbiddenExecutorResources = new Set([
+    "namespaces", "nodes", "persistentvolumes", "secrets", "serviceaccounts",
+    "roles", "rolebindings", "clusterroles", "clusterrolebindings",
+  ]);
+  for (const rule of executorRole.rules ?? []) {
+    for (const resource of rule.resources ?? []) {
+      assert.ok(
+        !forbiddenExecutorResources.has(resource),
+        `default executor Role includes cluster or identity boundary ${resource}`,
+      );
+    }
+  }
+  const executorBinding = resources.find(
+    ({ kind, metadata }) => kind === "RoleBinding" && metadata.name === "tracey-executor",
+  );
+  assert.equal(executorBinding?.roleRef?.kind, "Role", "default executor must bind a namespaced Role");
 
   verifyReleasePipeline();
   return { resources: resources.length, deployments: deployments.length, policies: policies.length };

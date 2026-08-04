@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   AgentDeploymentMappingSchema,
   AgentRegistrationSchema,
@@ -7,7 +7,14 @@ import {
   type AgentRegistration,
   type AgentRegistrationRequest,
 } from "@tracey/domain";
-import { AutonomyPolicySchema, type AutonomyPolicy, type PolicyDecision, type RemediationPlan } from "@tracey/autonomy";
+import {
+  AutonomyPolicySchema,
+  CloudActionSchema,
+  type AutonomyPolicy,
+  type CloudAction,
+  type PolicyDecision,
+  type RemediationPlan,
+} from "@tracey/autonomy";
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { z } from "zod";
 
@@ -114,6 +121,53 @@ export interface TriggerRule extends TriggerRuleInput {
   updatedAt: string;
 }
 
+export type DurableJobType = "trigger_poll" | "execute_scheduled_action" | "investigation_run" | "website_security_scan";
+export interface DurableJob {
+  jobId: string;
+  jobType: DurableJobType;
+  dedupeKey: string;
+  payload: Record<string, unknown>;
+  status: "queued" | "leased" | "succeeded" | "dead_letter";
+  attempts: number;
+  maxAttempts: number;
+  availableAt: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  lastErrorType?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export function durableJobBackoffSeconds(attempt: number): number {
+  return Math.min(15 * (2 ** Math.max(0, attempt - 1)), 15 * 60);
+}
+
+export interface WebsiteTarget {
+  targetId: string;
+  origin: string;
+  status: "pending_verification" | "verified" | "disabled";
+  verifiedAt?: string;
+  verifiedBy?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebsiteScan {
+  scanId: string;
+  targetId: string;
+  jobId: string;
+  status: "queued" | "running" | "completed" | "failed";
+  requestedBy: string;
+  result?: Record<string, unknown>;
+  errorType?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ActionProposal {
   proposalId: string; sessionId: string; actionType: "notification" | "ticket" | "restart" | "rollback" | "scale" | "resource_change" | "config_change";
   target: string; reason: string; parameters: Record<string, unknown>; risk: "low" | "medium" | "high";
@@ -133,8 +187,20 @@ export interface ActionProposal {
   approvalFingerprint?: string;
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export function actionApprovalFingerprint(proposal: Pick<ActionProposal, "actionType" | "target" | "reason" | "parameters" | "risk" | "remediationPlan">): string {
-  return createHash("sha256").update(JSON.stringify({
+  return createHash("sha256").update(canonicalJson({
     actionType: proposal.actionType,
     target: proposal.target,
     reason: proposal.reason,
@@ -146,6 +212,62 @@ export function actionApprovalFingerprint(proposal: Pick<ActionProposal, "action
 
 export function actionApprovalIsCurrent(proposal: ActionProposal): boolean {
   return Boolean(proposal.approvalFingerprint) && proposal.approvalFingerprint === actionApprovalFingerprint(proposal);
+}
+
+export interface ExecutorAuthorizationInput {
+  proposalId: string;
+  idempotencyKey: string;
+  action: unknown;
+}
+
+export interface ExecutorAuthorization {
+  phase: "execute" | "rollback";
+  action: CloudAction;
+  actionHash: string;
+}
+
+export function authorizeExecutorAction(
+  proposal: ActionProposal,
+  input: ExecutorAuthorizationInput,
+): ExecutorAuthorization {
+  if (proposal.proposalId !== input.proposalId) {
+    throw new PostgresStoreError("Executor proposal identity does not match the persisted proposal");
+  }
+  if (!proposal.remediationPlan || !actionApprovalIsCurrent(proposal)) {
+    throw new PostgresStoreError("Executor proposal approval is missing, stale, or invalid");
+  }
+
+  const rollback = proposal.remediationPlan.rollback;
+  const phase = proposal.status === "executing"
+    ? "execute"
+    : proposal.status === "reverting" && rollback?.automatic
+      ? "rollback"
+      : undefined;
+  if (!phase) {
+    throw new PostgresStoreError("Executor proposal is not in an authorized execution state");
+  }
+
+  const expectedIdempotencyKey = phase === "execute"
+    ? proposal.idempotencyKey
+    : `${proposal.idempotencyKey}:rollback`;
+  if (input.idempotencyKey !== expectedIdempotencyKey) {
+    throw new PostgresStoreError("Executor idempotency key does not match the persisted proposal phase");
+  }
+
+  const suppliedAction = CloudActionSchema.parse(input.action);
+  const expectedAction = phase === "execute"
+    ? proposal.remediationPlan.action
+    : rollback!.action;
+  const supplied = canonicalJson(suppliedAction);
+  const expected = canonicalJson(CloudActionSchema.parse(expectedAction));
+  if (supplied !== expected) {
+    throw new PostgresStoreError("Executor action does not exactly match the persisted approved action");
+  }
+  return {
+    phase,
+    action: suppliedAction,
+    actionHash: createHash("sha256").update(supplied).digest("hex"),
+  };
 }
 
 export interface TraceyNotification {
@@ -379,6 +501,7 @@ export class PostgresStore {
       return result;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
+      if (error instanceof PostgresStoreError) throw error;
       throw new PostgresStoreError("PostgreSQL operation failed", { cause: error });
     } finally {
       client.release();
@@ -718,6 +841,389 @@ export class PostgresStore {
             SET lease_owner=NULL, lease_until=NULL, next_poll_at=now()+(cooldown_minutes*interval '1 minute')
           WHERE tenant_id=$1 AND trigger_id=$2 AND lease_owner=$3`, [tenantId, z.string().uuid().parse(triggerId), workerId]);
     });
+  }
+
+  async enqueueDueJobs(tenantId: string, limit = 100): Promise<{ triggerPolls: number; scheduledActions: number }> {
+    const safeLimit = boundedInteger(limit, 1, 500, "limit");
+    return this.withTenant(tenantId, async (client) => {
+      const dueTriggers = await client.query(
+        `WITH due AS (
+           SELECT trigger_id
+             FROM tracey.investigation_triggers
+            WHERE tenant_id=$1 AND enabled AND kind IN ('error_run','latency') AND next_poll_at<=now()
+            ORDER BY next_poll_at,trigger_id
+            FOR UPDATE SKIP LOCKED LIMIT $2
+         )
+         UPDATE tracey.investigation_triggers trigger
+            SET next_poll_at=now()+(trigger.cooldown_minutes*interval '1 minute'),
+                lease_owner=NULL,lease_until=NULL,updated_at=now()
+           FROM due
+          WHERE trigger.tenant_id=$1 AND trigger.trigger_id=due.trigger_id
+         RETURNING trigger.trigger_id,trigger.agent_id,trigger.name,trigger.kind,trigger.threshold,
+                   trigger.lookback_minutes,trigger.cooldown_minutes`,
+        [tenantId, safeLimit],
+      );
+      let triggerPolls = 0;
+      for (const row of dueTriggers.rows) {
+        const scheduledAt = new Date().toISOString();
+        const result = await client.query(
+          `INSERT INTO tracey.durable_jobs
+            (tenant_id,job_id,job_type,dedupe_key,payload,max_attempts)
+           VALUES ($1,$2,'trigger_poll',$3,$4::jsonb,5)
+           ON CONFLICT (tenant_id,job_type,dedupe_key) DO NOTHING`,
+          [
+            tenantId,
+            randomUUID(),
+            `trigger:${String(row.trigger_id)}:${scheduledAt}`,
+            JSON.stringify({
+              triggerId: String(row.trigger_id),
+              agentId: String(row.agent_id),
+              name: String(row.name),
+              kind: String(row.kind),
+              ...(row.threshold === null ? {} : { threshold: Number(row.threshold) }),
+              lookbackMinutes: Number(row.lookback_minutes),
+              cooldownMinutes: Number(row.cooldown_minutes),
+            }),
+          ],
+        );
+        triggerPolls += result.rowCount ?? 0;
+      }
+
+      const dueActions = await client.query(
+        `SELECT proposal_id
+           FROM tracey.action_proposals
+          WHERE tenant_id=$1 AND scheduled_for<=now()
+            AND status IN ('approved','approved_for_auto_execution')
+          ORDER BY scheduled_for,proposal_id
+          FOR UPDATE SKIP LOCKED LIMIT $2`,
+        [tenantId, safeLimit],
+      );
+      let scheduledActions = 0;
+      for (const row of dueActions.rows) {
+        const proposalId = String(row.proposal_id);
+        const result = await client.query(
+          `INSERT INTO tracey.durable_jobs
+            (tenant_id,job_id,job_type,dedupe_key,payload,max_attempts)
+           VALUES ($1,$2,'execute_scheduled_action',$3,$4::jsonb,5)
+           ON CONFLICT (tenant_id,job_type,dedupe_key) DO NOTHING`,
+          [tenantId, randomUUID(), `action:${proposalId}`, JSON.stringify({ proposalId })],
+        );
+        scheduledActions += result.rowCount ?? 0;
+      }
+      return { triggerPolls, scheduledActions };
+    });
+  }
+
+  async enqueueJob(tenantId: string, input: {
+    jobType: DurableJobType;
+    dedupeKey: string;
+    payload: Record<string, unknown>;
+    availableAt?: Date;
+    maxAttempts?: number;
+  }): Promise<DurableJob | undefined> {
+    const parsed = z.object({
+      jobType: z.enum(["trigger_poll", "execute_scheduled_action", "investigation_run", "website_security_scan"]),
+      dedupeKey: z.string().min(1).max(500),
+      payload: z.record(z.unknown()),
+      availableAt: z.date().optional(),
+      maxAttempts: z.number().int().min(1).max(20).default(5),
+    }).parse(input);
+    if (Buffer.byteLength(JSON.stringify(parsed.payload)) > 32_000) throw new PostgresStoreError("job payload exceeds 32KB");
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO tracey.durable_jobs
+          (tenant_id,job_id,job_type,dedupe_key,payload,available_at,max_attempts)
+         VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
+         ON CONFLICT (tenant_id,job_type,dedupe_key) DO NOTHING
+         RETURNING *`,
+        [tenantId, randomUUID(), parsed.jobType, parsed.dedupeKey, JSON.stringify(parsed.payload), parsed.availableAt ?? new Date(), parsed.maxAttempts],
+      );
+      return result.rows[0] ? this.normalizeDurableJob(result.rows[0]) : undefined;
+    });
+  }
+
+  async claimDurableJobs(tenantId: string, workerId: string, input: { limit?: number; leaseSeconds?: number } = {}): Promise<DurableJob[]> {
+    const owner = z.string().min(1).max(200).parse(workerId);
+    const limit = boundedInteger(input.limit ?? 10, 1, 100, "limit");
+    const leaseSeconds = boundedInteger(input.leaseSeconds ?? 300, 30, 3_600, "leaseSeconds");
+    return this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE tracey.durable_jobs
+            SET status='dead_letter',lease_owner=NULL,lease_expires_at=NULL,
+                last_error_type=COALESCE(last_error_type,'LeaseExpired'),updated_at=now(),completed_at=now()
+          WHERE tenant_id=$1 AND status='leased' AND lease_expires_at<=now() AND attempts>=max_attempts`,
+        [tenantId],
+      );
+      const result = await client.query(
+        `WITH candidates AS (
+           SELECT job_id
+             FROM tracey.durable_jobs
+            WHERE tenant_id=$1 AND attempts<max_attempts
+              AND (
+                (status='queued' AND available_at<=now())
+                OR (status='leased' AND lease_expires_at<=now())
+              )
+            ORDER BY available_at,created_at,job_id
+            FOR UPDATE SKIP LOCKED LIMIT $2
+         )
+         UPDATE tracey.durable_jobs job
+            SET status='leased',lease_owner=$3,
+                lease_expires_at=now()+($4::int*interval '1 second'),
+                attempts=job.attempts+1,updated_at=now()
+           FROM candidates
+          WHERE job.tenant_id=$1 AND job.job_id=candidates.job_id
+         RETURNING job.*`,
+        [tenantId, limit, owner, leaseSeconds],
+      );
+      return result.rows.map((row) => this.normalizeDurableJob(row));
+    });
+  }
+
+  async renewDurableJobLease(tenantId: string, jobId: string, workerId: string, leaseSeconds = 300): Promise<boolean> {
+    const result = await this.withTenant(tenantId, async (client) => client.query(
+      `UPDATE tracey.durable_jobs
+          SET lease_expires_at=now()+($4::int*interval '1 second'),updated_at=now()
+        WHERE tenant_id=$1 AND job_id=$2 AND status='leased' AND lease_owner=$3
+        RETURNING job_id`,
+      [tenantId, z.string().uuid().parse(jobId), z.string().min(1).max(200).parse(workerId), boundedInteger(leaseSeconds, 30, 3_600, "leaseSeconds")],
+    ));
+    return Boolean(result.rows[0]);
+  }
+
+  async completeDurableJob(tenantId: string, jobId: string, workerId: string): Promise<boolean> {
+    const result = await this.withTenant(tenantId, async (client) => client.query(
+      `UPDATE tracey.durable_jobs
+          SET status='succeeded',lease_owner=NULL,lease_expires_at=NULL,completed_at=now(),updated_at=now()
+        WHERE tenant_id=$1 AND job_id=$2 AND status='leased' AND lease_owner=$3
+        RETURNING job_id`,
+      [tenantId, z.string().uuid().parse(jobId), z.string().min(1).max(200).parse(workerId)],
+    ));
+    return Boolean(result.rows[0]);
+  }
+
+  async failDurableJob(tenantId: string, jobId: string, workerId: string, errorType: string, permanent = false): Promise<DurableJob | undefined> {
+    const safeError = z.string().min(1).max(200).parse(errorType);
+    return this.withTenant(tenantId, async (client) => {
+      const current = await client.query(
+        `SELECT attempts,max_attempts FROM tracey.durable_jobs
+          WHERE tenant_id=$1 AND job_id=$2 AND status='leased' AND lease_owner=$3
+          FOR UPDATE`,
+        [tenantId, z.string().uuid().parse(jobId), z.string().min(1).max(200).parse(workerId)],
+      );
+      if (!current.rows[0]) return undefined;
+      const attempts = Number(current.rows[0].attempts);
+      const dead = permanent || attempts >= Number(current.rows[0].max_attempts);
+      const result = await client.query(
+        `UPDATE tracey.durable_jobs
+            SET status=$4,lease_owner=NULL,lease_expires_at=NULL,last_error_type=$5,
+                available_at=CASE WHEN $4='queued' THEN now()+($6::int*interval '1 second') ELSE available_at END,
+                completed_at=CASE WHEN $4='dead_letter' THEN now() ELSE NULL END,updated_at=now()
+          WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3
+          RETURNING *`,
+        [tenantId, jobId, workerId, dead ? "dead_letter" : "queued", safeError, durableJobBackoffSeconds(attempts)],
+      );
+      return result.rows[0] ? this.normalizeDurableJob(result.rows[0]) : undefined;
+    });
+  }
+
+  async durableJobStats(tenantId: string): Promise<Record<DurableJob["status"], number>> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT status,count(*)::int AS count FROM tracey.durable_jobs WHERE tenant_id=$1 GROUP BY status`,
+        [tenantId],
+      );
+      const stats = { queued: 0, leased: 0, succeeded: 0, dead_letter: 0 };
+      for (const row of result.rows) stats[row.status as DurableJob["status"]] = Number(row.count);
+      return stats;
+    });
+  }
+
+  private normalizeDurableJob(row: QueryResultRow): DurableJob {
+    return {
+      jobId: String(row.job_id),
+      jobType: row.job_type as DurableJobType,
+      dedupeKey: String(row.dedupe_key),
+      payload: row.payload as Record<string, unknown>,
+      status: row.status as DurableJob["status"],
+      attempts: Number(row.attempts),
+      maxAttempts: Number(row.max_attempts),
+      availableAt: new Date(row.available_at as string).toISOString(),
+      ...(row.lease_owner ? { leaseOwner: String(row.lease_owner) } : {}),
+      ...(row.lease_expires_at ? { leaseExpiresAt: new Date(row.lease_expires_at as string).toISOString() } : {}),
+      ...(row.last_error_type ? { lastErrorType: String(row.last_error_type) } : {}),
+      createdAt: new Date(row.created_at as string).toISOString(),
+      updatedAt: new Date(row.updated_at as string).toISOString(),
+      ...(row.completed_at ? { completedAt: new Date(row.completed_at as string).toISOString() } : {}),
+    };
+  }
+
+  async createWebsiteTarget(tenantId: string, origin: string, actor: string): Promise<{ target: WebsiteTarget; verificationToken?: string }> {
+    const safeOrigin = z.string().url().max(2_048).parse(origin);
+    const safeActor = z.string().min(1).max(300).parse(actor);
+    return this.withTenant(tenantId, async (client) => {
+      const existing = await client.query(
+        `SELECT * FROM tracey.website_targets WHERE tenant_id=$1 AND origin=$2 FOR UPDATE`,
+        [tenantId, safeOrigin],
+      );
+      if (existing.rows[0]?.status === "verified") {
+        return { target: this.normalizeWebsiteTarget(existing.rows[0]) };
+      }
+      const verificationToken = `tracey-verify-${randomBytes(32).toString("base64url")}`;
+      const tokenHash = createHash("sha256").update(verificationToken).digest("hex");
+      const result = await client.query(
+        `INSERT INTO tracey.website_targets
+          (tenant_id,target_id,origin,status,verification_token_hash,created_by)
+         VALUES ($1,$2,$3,'pending_verification',$4,$5)
+         ON CONFLICT (tenant_id,origin) DO UPDATE SET
+           status='pending_verification',verification_token_hash=EXCLUDED.verification_token_hash,
+           verified_at=NULL,verified_by=NULL,updated_at=now()
+         RETURNING *`,
+        [tenantId, randomUUID(), safeOrigin, tokenHash, safeActor],
+      );
+      return { target: this.normalizeWebsiteTarget(result.rows[0]), verificationToken };
+    });
+  }
+
+  async listWebsiteTargets(tenantId: string): Promise<WebsiteTarget[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM tracey.website_targets WHERE tenant_id=$1 ORDER BY created_at DESC,target_id DESC LIMIT 200`,
+        [tenantId],
+      );
+      return result.rows.map((row) => this.normalizeWebsiteTarget(row));
+    });
+  }
+
+  async getWebsiteTarget(tenantId: string, targetId: string): Promise<WebsiteTarget | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM tracey.website_targets WHERE tenant_id=$1 AND target_id=$2`,
+        [tenantId, z.string().uuid().parse(targetId)],
+      );
+      return result.rows[0] ? this.normalizeWebsiteTarget(result.rows[0]) : undefined;
+    });
+  }
+
+  async verifyWebsiteTargetToken(tenantId: string, targetId: string, token: string, actor: string): Promise<WebsiteTarget | undefined> {
+    const safeToken = z.string().min(32).max(256).parse(token);
+    const suppliedHash = Buffer.from(createHash("sha256").update(safeToken).digest("hex"));
+    return this.withTenant(tenantId, async (client) => {
+      const current = await client.query(
+        `SELECT verification_token_hash FROM tracey.website_targets WHERE tenant_id=$1 AND target_id=$2 FOR UPDATE`,
+        [tenantId, z.string().uuid().parse(targetId)],
+      );
+      if (!current.rows[0]) return undefined;
+      const expectedHash = Buffer.from(String(current.rows[0].verification_token_hash));
+      if (suppliedHash.length !== expectedHash.length || !timingSafeEqual(suppliedHash, expectedHash)) {
+        throw new PostgresStoreError("Website verification token does not match");
+      }
+      const result = await client.query(
+        `UPDATE tracey.website_targets SET status='verified',verified_at=now(),verified_by=$3,updated_at=now()
+          WHERE tenant_id=$1 AND target_id=$2 RETURNING *`,
+        [tenantId, targetId, z.string().min(1).max(300).parse(actor)],
+      );
+      return this.normalizeWebsiteTarget(result.rows[0]);
+    });
+  }
+
+  async createWebsiteScan(tenantId: string, targetId: string, actor: string): Promise<WebsiteScan | undefined> {
+    const id = z.string().uuid().parse(targetId);
+    const requestedBy = z.string().min(1).max(300).parse(actor);
+    return this.withTenant(tenantId, async (client) => {
+      const target = await client.query(
+        `SELECT status FROM tracey.website_targets WHERE tenant_id=$1 AND target_id=$2 FOR UPDATE`,
+        [tenantId, id],
+      );
+      if (!target.rows[0]) return undefined;
+      if (target.rows[0].status !== "verified") throw new PostgresStoreError("Website target ownership is not verified");
+      const scanId = randomUUID();
+      const jobId = randomUUID();
+      await client.query(
+        `INSERT INTO tracey.durable_jobs
+          (tenant_id,job_id,job_type,dedupe_key,payload,max_attempts)
+         VALUES ($1,$2,'website_security_scan',$3,$4::jsonb,3)`,
+        [tenantId, jobId, `website-scan:${scanId}`, JSON.stringify({ scanId, targetId: id })],
+      );
+      const result = await client.query(
+        `INSERT INTO tracey.website_scans (tenant_id,scan_id,target_id,job_id,requested_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [tenantId, scanId, id, jobId, requestedBy],
+      );
+      return this.normalizeWebsiteScan(result.rows[0]);
+    });
+  }
+
+  async listWebsiteScans(tenantId: string, targetId?: string): Promise<WebsiteScan[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM tracey.website_scans
+          WHERE tenant_id=$1 AND ($2::uuid IS NULL OR target_id=$2)
+          ORDER BY created_at DESC,scan_id DESC LIMIT 200`,
+        [tenantId, targetId ? z.string().uuid().parse(targetId) : null],
+      );
+      return result.rows.map((row) => this.normalizeWebsiteScan(row));
+    });
+  }
+
+  async getWebsiteScan(tenantId: string, scanId: string): Promise<WebsiteScan | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM tracey.website_scans WHERE tenant_id=$1 AND scan_id=$2`,
+        [tenantId, z.string().uuid().parse(scanId)],
+      );
+      return result.rows[0] ? this.normalizeWebsiteScan(result.rows[0]) : undefined;
+    });
+  }
+
+  async startWebsiteScan(tenantId: string, scanId: string): Promise<WebsiteScan | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE tracey.website_scans SET status='running',started_at=COALESCE(started_at,now()),error_type=NULL,updated_at=now()
+          WHERE tenant_id=$1 AND scan_id=$2 AND status IN ('queued','running') RETURNING *`,
+        [tenantId, z.string().uuid().parse(scanId)],
+      );
+      return result.rows[0] ? this.normalizeWebsiteScan(result.rows[0]) : undefined;
+    });
+  }
+
+  async completeWebsiteScan(tenantId: string, scanId: string, result: Record<string, unknown>): Promise<WebsiteScan | undefined> {
+    if (Buffer.byteLength(JSON.stringify(result)) > 1_000_000) throw new PostgresStoreError("Website scan result exceeds 1MB");
+    return this.withTenant(tenantId, async (client) => {
+      const saved = await client.query(
+        `UPDATE tracey.website_scans SET status='completed',result=$3::jsonb,error_type=NULL,completed_at=now(),updated_at=now()
+          WHERE tenant_id=$1 AND scan_id=$2 AND status='running' RETURNING *`,
+        [tenantId, z.string().uuid().parse(scanId), JSON.stringify(result)],
+      );
+      return saved.rows[0] ? this.normalizeWebsiteScan(saved.rows[0]) : undefined;
+    });
+  }
+
+  async recordWebsiteScanFailure(tenantId: string, scanId: string, errorType: string, final: boolean): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE tracey.website_scans SET status=$3,error_type=$4,completed_at=CASE WHEN $3='failed' THEN now() ELSE NULL END,updated_at=now()
+          WHERE tenant_id=$1 AND scan_id=$2 AND status IN ('queued','running')`,
+        [tenantId, z.string().uuid().parse(scanId), final ? "failed" : "queued", z.string().min(1).max(200).parse(errorType)],
+      );
+    });
+  }
+
+  private normalizeWebsiteTarget(row: QueryResultRow): WebsiteTarget {
+    return {
+      targetId: String(row.target_id),origin: String(row.origin),status: row.status as WebsiteTarget["status"],
+      ...(row.verified_at ? { verifiedAt: new Date(row.verified_at as string).toISOString() } : {}),
+      ...(row.verified_by ? { verifiedBy: String(row.verified_by) } : {}),createdBy: String(row.created_by),
+      createdAt: new Date(row.created_at as string).toISOString(),updatedAt: new Date(row.updated_at as string).toISOString(),
+    };
+  }
+
+  private normalizeWebsiteScan(row: QueryResultRow): WebsiteScan {
+    return {
+      scanId: String(row.scan_id),targetId: String(row.target_id),jobId: String(row.job_id),status: row.status as WebsiteScan["status"],requestedBy: String(row.requested_by),
+      ...(row.result ? { result: row.result as Record<string, unknown> } : {}),...(row.error_type ? { errorType: String(row.error_type) } : {}),
+      ...(row.started_at ? { startedAt: new Date(row.started_at as string).toISOString() } : {}),...(row.completed_at ? { completedAt: new Date(row.completed_at as string).toISOString() } : {}),
+      createdAt: new Date(row.created_at as string).toISOString(),updatedAt: new Date(row.updated_at as string).toISOString(),
+    };
   }
 
   async createActionProposal(tenantId: string, input: {
@@ -1254,12 +1760,24 @@ export class PostgresStore {
     action: unknown;
   }): Promise<{ claimed: boolean; status: "executing" | "succeeded" | "failed"; result?: Record<string, unknown> }> {
     const parsed = z.object({ idempotencyKey: z.string().min(1).max(255), proposalId: z.string().uuid() }).parse(input);
-    const actionHash = createHash("sha256").update(JSON.stringify(input.action)).digest("hex");
     return this.withTenant(tenantId, async (client) => {
+      const proposalResult = await client.query(
+        `SELECT * FROM tracey.action_proposals
+          WHERE tenant_id=$1 AND proposal_id=$2
+          FOR UPDATE`,
+        [tenantId, parsed.proposalId],
+      );
+      if (!proposalResult.rows[0]) {
+        throw new PostgresStoreError("Executor proposal is not available in the authenticated tenant");
+      }
+      const authorization = authorizeExecutorAction(
+        normalizeActionProposal(proposalResult.rows[0]),
+        { ...parsed, action: input.action },
+      );
       const inserted = await client.query(
         `INSERT INTO tracey.executor_receipts (tenant_id,idempotency_key,proposal_id,action_hash,status)
          VALUES ($1,$2,$3,$4,'executing') ON CONFLICT DO NOTHING RETURNING status`,
-        [tenantId, parsed.idempotencyKey, parsed.proposalId, actionHash],
+        [tenantId, parsed.idempotencyKey, parsed.proposalId, authorization.actionHash],
       );
       if (inserted.rows[0]) return { claimed: true, status: "executing" };
       const existing = await client.query(
@@ -1267,7 +1785,7 @@ export class PostgresStore {
           WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE`, [tenantId, parsed.idempotencyKey],
       );
       const row = existing.rows[0];
-      if (!row || row.action_hash !== actionHash) throw new PostgresStoreError("Idempotency key was reused with a different action");
+      if (!row || row.action_hash !== authorization.actionHash) throw new PostgresStoreError("Idempotency key was reused with a different action");
       return {
         claimed: false,
         status: row.status as "executing" | "succeeded" | "failed",

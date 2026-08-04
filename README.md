@@ -4,7 +4,7 @@
 
 Tracey is a production-agent observability control plane built on OpenTelemetry and SigNoz. Production agents remain independently deployed and export telemetry through an OpenTelemetry Collector. Tracey queries SigNoz out of band, reconstructs agent-run graphs, computes critical paths and cost, produces evidence-linked diagnoses, and exposes the same bounded investigation contract through HTTP and MCP.
 
-Tracey also includes an evidence-bound agentic investigator, persistent chat, production triggers, distributed polling workers, an in-product notification center at `/notifs`, OIDC/RBAC, five autonomy modes, a deterministic policy engine, a separately deployed authenticated executor, and verified recovery. The default operator posture is approval-first: Tracey can prepare broad cloud changes, but pauses every mutation for confirmation. See [docs/agentic-layer.md](docs/agentic-layer.md).
+Tracey also includes an evidence-bound agentic investigator, persistent chat, production triggers, leased background jobs, an in-product notification center at `/notifs`, OIDC/RBAC, five autonomy modes, a deterministic policy engine, a separately deployed authenticated executor, verified recovery, and ownership-verified website security reviews. The default operator posture is approval-first: Tracey can prepare broad cloud changes, but pauses every mutation for confirmation. See [docs/agentic-layer.md](docs/agentic-layer.md).
 
 Read the current [product TODO](TODO.md), the [connector documentation](docs/connectors/README.md), and the [contribution guide](CONTRIBUTING.md).
 
@@ -22,6 +22,7 @@ Tracey core
 ├── Policy engine               packages/autonomy
 ├── Restricted executor         apps/executor
 ├── PostgreSQL + pgvector        packages/postgres-store, infra/postgres
+├── Website security scanner     packages/website-scanner
 └── Connector framework         packages/connectors
     ├── SigNoz                  packages/signoz-adapter
     ├── Kubernetes              packages/cloud-adapter
@@ -72,6 +73,8 @@ Claude Code native trace discovery and framework-neutral custom `agent.run` disc
 - Kubernetes when using cloud investigation, execution, verification, or recovery
 
 No model-provider key is required for deterministic telemetry queries or stored diagnoses. OpenRouter is used by the optional agentic layer for chat, tool selection, and structured remediation planning; it never receives infrastructure mutation authority, and all tool results are redacted before transmission.
+
+The Website security page at `/security` accepts only HTTPS websites whose ownership has been proven through a one-time file. Its worker performs bounded, read-only checks using GET requests, follows same-origin redirects only, rejects private and reserved network destinations, caps response size, and stores evidence-linked findings. It does not send exploit payloads or claim to replace an authorized penetration test. See [docs/website-security.md](docs/website-security.md).
 
 ## Configuration
 
@@ -209,11 +212,11 @@ Production defaults to `approval`; the other modes are `observe`, `recommend`, `
 
 The LLM can call `propose_remediation`, but it cannot call Kubernetes mutations. The API sends an approved structured action to the independently authenticated executor ServiceAccount. In addition to purpose-built restart, rollback, scale, resource, HPA, Job, CronJob, and rollout tools, Tracey can apply, merge-patch, and delete arbitrary permitted Kubernetes resource kinds. These generic operations always require an explicit administrator confirmation, even if a policy is configured for autopilot.
 
-The executor has broad workload and platform-resource permissions across the cluster. The small remaining boundary is deliberate: it cannot read or mutate Secrets, service accounts, RBAC roles/bindings, or namespaces, and it does not expose arbitrary shell or pod-exec. Those operations would turn an unauthenticated or compromised UI session into credential theft or an unrestricted remote shell; they require a separately secured privileged connector rather than ordinary confirmation.
+The default executor has a namespace-scoped Kubernetes Role. Additional workload namespaces receive their own explicit RoleBinding; Tracey does not silently expand the default identity into a ClusterRole. Broad cluster operation uses a separately deployed privileged executor identity and an explicit application flag. Neither executor can mutate Secrets, service accounts, RBAC roles/bindings, or namespaces, and neither exposes arbitrary shell or pod-exec.
 
 Use the API-backed SRE UI for policy editing, plan construction, evidence, action timelines, approvals, verification, rollback, and notifications. `/notifs` is Tracey's internal notification center; Slack, email, and PagerDuty are not required.
 
-The current dashboard has no end-user sign-in screen. It authenticates server-to-server with `TRACEY_UI_ACCESS_TOKEN`, so credentials are never rendered in the browser. Until an external IdP is configured, deploy the UI only on a trusted network because every UI visitor receives the same control-plane capabilities.
+Production and staging use OIDC authorization-code login with PKCE. Each browser user receives an encrypted, HttpOnly session containing that user's short-lived access and refresh tokens; the proxy forwards the individual access token and rotates refreshed sessions. The local profile can retain `TRACEY_UI_ACCESS_TOKEN` for loopback-only development, but `scripts/deploy-k8s.sh` rejects staging or production without an OIDC UI environment file.
 
 ## Kubernetes deployment profiles
 
@@ -225,7 +228,7 @@ The complete deployment entrypoint runs all migrations first and fails if a requ
 TRACEY_DEPLOYMENT_PROFILE=production ./scripts/deploy-k8s.sh
 ```
 
-The investigator and executor use separate namespace-scoped ServiceAccounts. Manifests include NetworkPolicies, PDBs, probes, resources, non-root security contexts, and Secret references. The local profile additionally deploys ephemeral pgvector PostgreSQL for kind verification.
+The investigator and executor use separate ServiceAccounts. The default executor Role is namespace-scoped; optional external namespace and privileged connector provisioning is documented in [docs/connectors/kubernetes.md](docs/connectors/kubernetes.md). Manifests include NetworkPolicies, PDBs, probes, resources, non-root security contexts, and Secret references. The local profile additionally deploys ephemeral pgvector PostgreSQL for kind verification.
 
 Kubernetes chat tools use the namespaces and workloads configured by `TRACEY_KUBERNETES_ALLOWED_NAMESPACES` and `TRACEY_KUBERNETES_ALLOWED_WORKLOADS`. Each accepts comma-separated names or `*` for the full scope visible to Tracey's Kubernetes identities. A request such as `which pods are active` lists pods across the connected namespace scope without requiring the user to repeat a namespace. Cluster-wide observation excludes Secret contents; mutation remains typed, policy-evaluated, audited, verified, and rollback-aware.
 

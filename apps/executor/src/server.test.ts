@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { KubernetesAdapter } from "@tracey/cloud-adapter";
-import type { PostgresStore } from "@tracey/postgres-store";
+import { PostgresStoreError, type PostgresStore } from "@tracey/postgres-store";
 import { buildExecutorServer } from "./server.js";
 
 describe("restricted executor", () => {
@@ -22,6 +22,11 @@ describe("restricted executor", () => {
       tenantId: "tenant-a", bearerToken: "x".repeat(32), databaseUrl: "postgresql://unused",
       allowedNamespaces: ["production"], allowedWorkloads: ["sample-workload"],
     }, { store, kubernetes });
+    const live = await server.inject({ method: "GET", url: "/live" });
+    const ready = await server.inject({ method: "GET", url: "/ready" });
+    assert.equal(live.statusCode, 200);
+    assert.equal(ready.statusCode, 200);
+    assert.deepEqual(ready.json().dependencies, { postgres: "ready", kubernetes: "ready" });
     const body = { proposalId: crypto.randomUUID(), action: { type: "restart_workload", namespace: "production", workload: "sample-workload" } };
     const unauthorized = await server.inject({ method: "POST", url: "/v1/actions/execute", payload: body, headers: { "idempotency-key": "action-1" } });
     assert.equal(unauthorized.statusCode, 401);
@@ -30,6 +35,36 @@ describe("restricted executor", () => {
     assert.equal(first.statusCode, 200);
     assert.equal(replay.json().replayed, true);
     assert.equal(executions, 1);
+    await server.close();
+  });
+
+  it("does not execute when persisted proposal authorization fails", async () => {
+    let executed = false;
+    const store = {
+      claimExecutorAction: async () => {
+        throw new PostgresStoreError("approval fingerprint is stale");
+      },
+      checkHealth: async () => undefined,
+    } as unknown as PostgresStore;
+    const kubernetes = {
+      execute: async () => { executed = true; return { accepted: true }; },
+      checkMutationAccess: async () => undefined,
+    } as unknown as KubernetesAdapter;
+    const server = buildExecutorServer({
+      tenantId: "tenant-a", bearerToken: "x".repeat(32), databaseUrl: "postgresql://unused",
+      allowedNamespaces: ["production"], allowedWorkloads: ["sample-workload"],
+    }, { store, kubernetes });
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/actions/execute",
+      headers: { authorization: `Bearer ${"x".repeat(32)}`, "idempotency-key": crypto.randomUUID() },
+      payload: {
+        proposalId: crypto.randomUUID(),
+        action: { type: "restart_workload", namespace: "production", workload: "sample-workload" },
+      },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(executed, false);
     await server.close();
   });
 });
