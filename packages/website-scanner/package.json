@@ -16,7 +16,7 @@
     "test": "node --conditions=development --import tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.20.3"

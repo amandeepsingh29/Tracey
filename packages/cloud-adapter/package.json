@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@tracey/autonomy": "workspace:*",
-    "@kubernetes/client-node": "^0.20.0",
-    "zod": "^3.23.8"
+    "@kubernetes/client-node": "^1.4.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.20.3"
