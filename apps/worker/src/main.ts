@@ -29,6 +29,7 @@ const TriggerPollPayloadSchema = z.object({
 });
 const ScheduledActionPayloadSchema = z.object({ proposalId: z.string().uuid() });
 const WebsiteScanPayloadSchema = z.object({ scanId: z.string().uuid(), targetId: z.string().uuid() });
+const InvestigationRunPayloadSchema = z.object({ runId: z.string().uuid(), sessionId: z.string().uuid() });
 
 class PermanentJobError extends Error {
   constructor(message: string) {
@@ -115,6 +116,17 @@ async function processWebsiteScan(job: DurableJob): Promise<void> {
   if (!completed) throw new Error("Website scan state changed before completion");
 }
 
+async function processInvestigationRun(job: DurableJob): Promise<void> {
+  const { runId } = InvestigationRunPayloadSchema.parse(job.payload);
+  const current = await store.getInvestigationRun(config.TRACEY_TENANT_ID, runId);
+  if (!current) throw new PermanentJobError("Investigation run does not exist");
+  if (current.status === "completed" || current.status === "cancelled") return;
+  const response = await api(`/v1/internal/investigation-runs/${runId}/execute`, { method: "POST", body: "{}" });
+  if (response.ok) return;
+  if (permanentHttpFailure(response.status)) throw new PermanentJobError(`Investigation execution returned HTTP ${response.status}`);
+  throw new Error(`Investigation execution returned HTTP ${response.status}`);
+}
+
 async function processJob(job: DurableJob): Promise<void> {
   let leaseTimer: NodeJS.Timeout | undefined;
   const renewEveryMs = Math.max(10_000, Math.floor(config.WORKER_JOB_LEASE_SECONDS * 500));
@@ -140,6 +152,7 @@ async function processJob(job: DurableJob): Promise<void> {
   try {
     if (job.jobType === "trigger_poll") await processTriggerPoll(job);
     else if (job.jobType === "execute_scheduled_action") await processScheduledAction(job);
+    else if (job.jobType === "investigation_run") await processInvestigationRun(job);
     else if (job.jobType === "website_security_scan") await processWebsiteScan(job);
     else throw new PermanentJobError(`Worker does not support job type ${job.jobType}`);
     const completed = await store.completeDurableJob(config.TRACEY_TENANT_ID, job.jobId, workerId);
@@ -159,6 +172,17 @@ async function processJob(job: DurableJob): Promise<void> {
         await store.recordWebsiteScanFailure(
           config.TRACEY_TENANT_ID,
           payload.data.scanId,
+          errorType,
+          failedJob?.status === "dead_letter",
+        );
+      }
+    }
+    if (job.jobType === "investigation_run") {
+      const payload = InvestigationRunPayloadSchema.safeParse(job.payload);
+      if (payload.success) {
+        await store.recordInvestigationRunFailure(
+          config.TRACEY_TENANT_ID,
+          payload.data.runId,
           errorType,
           failedJob?.status === "dead_letter",
         );

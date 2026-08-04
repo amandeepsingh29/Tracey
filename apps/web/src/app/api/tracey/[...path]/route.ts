@@ -35,7 +35,8 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   // Agentic investigations may legitimately make several bounded tool calls.
   // Keep the UI proxy above the API's 120 second maximum agent timeout so a
   // completed investigation is never presented as an unreachable API.
-  const timeout = setTimeout(() => controller.abort(), 125_000);
+  const streaming = request.headers.get("accept")?.includes("text/event-stream") ?? false;
+  const timeout = setTimeout(() => controller.abort(), streaming ? 15 * 60_000 : 125_000);
   try {
     const body = methodsWithBody.has(request.method) ? await request.text() : "";
     const hasBody = body.length > 0;

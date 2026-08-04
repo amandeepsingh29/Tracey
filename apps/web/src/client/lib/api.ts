@@ -1,6 +1,6 @@
 import type {
   ActionEvent, ActionProposal, Agent, AgentConnectionRequest, AgentDeployment, AgentSetupRequest, GeneratedAgentSetup, Connector, ConnectorCatalog, Health, InvestigationMessage,
-  InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
+  InvestigationRun, InvestigationRunStep, InvestigationSession, Notification, PolicyRecord, RunSearchResult, TraceDetails,
   Incident, IncidentEvent, IncidentStatus, ExecutionFeed, KubernetesDeploymentSummary,
   CodexExecutionGraph, RecentCodexConversations,
   WebsiteScan, WebsiteTarget,
@@ -21,6 +21,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const payload = await response.json().catch(() => ({})) as { error?: string; retryable?: boolean };
   if (!response.ok) throw new ApiError(payload.error ?? `Request failed with HTTP ${response.status}`, response.status, payload.retryable ?? response.status >= 500);
   return payload as T;
+}
+
+async function streamInvestigationRun(
+  runId: string,
+  onProgress: (detail: { run: InvestigationRun; steps: InvestigationRunStep[] }) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`/api/tracey/v1/investigation-runs/${runId}/events`, {
+    headers: { accept: "text/event-stream" },
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({})) as { error?: string };
+    throw new ApiError(payload.error ?? `Progress stream failed with HTTP ${response.status}`, response.status, response.status >= 500);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const event of events) {
+      const data = event.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
+      if (!data || event.startsWith("event: error")) continue;
+      onProgress(JSON.parse(data) as { run: InvestigationRun; steps: InvestigationRunStep[] });
+    }
+  }
 }
 
 const query = (values: Record<string, string | number | boolean | undefined>) => {
@@ -57,7 +88,11 @@ export const api = {
   createInvestigation: (title: string) => request<InvestigationSession>("/v1/investigations", { method: "POST", body: JSON.stringify({ title }) }),
   clearInvestigations: () => request<{ sessionsDeleted: number; messagesDeleted: number; toolAuditsDeleted: number; actionProposalsDeleted: number }>("/v1/investigations", { method: "DELETE" }),
   messages: (sessionId: string) => request<{ messages: InvestigationMessage[] }>(`/v1/investigations/${sessionId}/messages`),
-  chat: (sessionId: string, content: string) => request<InvestigationMessage>(`/v1/investigations/${sessionId}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+  chat: (sessionId: string, content: string) => request<{ run: InvestigationRun; message: InvestigationMessage }>(`/v1/investigations/${sessionId}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+  investigationRuns: (sessionId: string) => request<{ runs: InvestigationRun[] }>(`/v1/investigations/${sessionId}/runs`),
+  investigationRun: (runId: string) => request<{ run: InvestigationRun; steps: InvestigationRunStep[] }>(`/v1/investigation-runs/${runId}`),
+  streamInvestigationRun,
+  cancelInvestigationRun: (runId: string) => request<{ run: InvestigationRun }>(`/v1/investigation-runs/${runId}/cancel`, { method: "POST", body: "{}" }),
   actions: (limit = 200) => request<{ actions: ActionProposal[] }>(`/v1/actions?${query({ limit })}`),
   action: (proposalId: string) => request<{ action: ActionProposal; events: ActionEvent[] }>(`/v1/actions/${proposalId}`),
   decideAction: (proposalId: string, decision: "approved" | "rejected") => request<ActionProposal>(`/v1/actions/${proposalId}/decision`, { method: "POST", body: JSON.stringify({ decision }) }),
@@ -84,4 +119,5 @@ export const api = {
   websiteScans: (targetId?: string) => request<{ scans: WebsiteScan[] }>(`/v1/security/website-scans?${query({ targetId })}`),
   websiteScan: (scanId: string) => request<{ scan: WebsiteScan }>(`/v1/security/website-scans/${scanId}`),
   createWebsiteScan: (targetId: string) => request<{ scan: WebsiteScan }>(`/v1/security/website-targets/${targetId}/scans`, { method: "POST", body: "{}" }),
+  investigateWebsiteScan: (scanId: string) => request<{ investigation: { session: InvestigationSession } }>(`/v1/security/website-scans/${scanId}/investigation`, { method: "POST", body: "{}" }),
 };

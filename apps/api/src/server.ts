@@ -146,6 +146,7 @@ export function buildServer(config: AppConfig) {
         baseUrl: config.OPENROUTER_BASE_URL,
         model: config.TRACEY_AGENT_MODEL,
         timeoutMs: config.TRACEY_AGENT_TIMEOUT_MS,
+        toolTimeoutMs: config.TRACEY_AGENT_TOOL_TIMEOUT_MS,
         tenantId: config.TRACEY_TENANT_ID,
         environment: config.DEPLOYMENT_ENVIRONMENT,
         allowedNamespaces: config.TRACEY_KUBERNETES_ALLOWED_NAMESPACES.split(",").map((entry) => entry.trim()).filter(Boolean),
@@ -226,7 +227,7 @@ export function buildServer(config: AppConfig) {
     autonomy = store ? new AutonomyService(config.TRACEY_TENANT_ID, config.DEPLOYMENT_ENVIRONMENT, store, actionExecutor) : undefined;
     investigations = signoz ? new InvestigationService(signoz) : undefined;
     agentic = store && investigations && config.OPENROUTER_API_KEY ? new AgenticInvestigator({ apiKey: config.OPENROUTER_API_KEY, baseUrl: config.OPENROUTER_BASE_URL,
-      model: config.TRACEY_AGENT_MODEL, timeoutMs: config.TRACEY_AGENT_TIMEOUT_MS, tenantId: config.TRACEY_TENANT_ID, environment: config.DEPLOYMENT_ENVIRONMENT,
+      model: config.TRACEY_AGENT_MODEL, timeoutMs: config.TRACEY_AGENT_TIMEOUT_MS, toolTimeoutMs: config.TRACEY_AGENT_TOOL_TIMEOUT_MS, tenantId: config.TRACEY_TENANT_ID, environment: config.DEPLOYMENT_ENVIRONMENT,
       allowedNamespaces: kubernetesRuntime.allowedNamespaces, allowedWorkloads: kubernetesRuntime.allowedWorkloads }, investigations, store, autonomy, {
         list: listConnectedAgents,
         get: getConnectedAgent,
@@ -500,6 +501,24 @@ export function buildServer(config: AppConfig) {
     return scan ? { scan } : reply.code(404).send({ error: "Website scan not found" });
   });
 
+  server.post("/v1/security/website-scans/:scanId/investigation", { preHandler: analystAuth }, async (request, reply) => {
+    if (!store || !agentic) return reply.code(503).send({ error: "Agentic website investigations require PostgreSQL, SigNoz, and OPENROUTER_API_KEY" });
+    const scanId = z.string().uuid().safeParse((request.params as { scanId?: string }).scanId);
+    if (!scanId.success) return reply.code(400).send({ error: "Invalid website scan ID" });
+    try {
+      const investigation = await store.createWebsiteScanInvestigation(
+        config.TRACEY_TENANT_ID,
+        scanId.data,
+        request.authContext!.subject,
+        request.authContext!.roles,
+      );
+      return reply.code(202).send({ investigation });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Website investigation could not be started";
+      return reply.code(message.includes("completed") || message.includes("verified") ? 409 : 503).send({ error: message });
+    }
+  });
+
   server.post("/v1/investigations", { preHandler: analystAuth }, async (request, reply) => {
     if (!agentic) return reply.code(503).send({ error: "Agentic investigation requires PostgreSQL, SigNoz, and OPENROUTER_API_KEY" });
     const parsed = z.object({ title: z.string().trim().min(1).max(200) }).safeParse(request.body);
@@ -546,6 +565,84 @@ export function buildServer(config: AppConfig) {
     }
   });
 
+  server.get("/v1/investigations/:sessionId/runs", { preHandler: apiAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for investigation runs" });
+    const sessionId = z.string().uuid().safeParse((request.params as { sessionId?: string }).sessionId);
+    if (!sessionId.success) return reply.code(400).send({ error: "Invalid investigation session ID" });
+    return { runs: await store.listInvestigationRuns(config.TRACEY_TENANT_ID, sessionId.data) };
+  });
+
+  server.get("/v1/investigation-runs/:runId", { preHandler: apiAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for investigation runs" });
+    const runId = z.string().uuid().safeParse((request.params as { runId?: string }).runId);
+    if (!runId.success) return reply.code(400).send({ error: "Invalid investigation run ID" });
+    const run = await store.getInvestigationRun(config.TRACEY_TENANT_ID, runId.data);
+    if (!run) return reply.code(404).send({ error: "Investigation run not found" });
+    return { run, steps: await store.listInvestigationRunSteps(config.TRACEY_TENANT_ID, runId.data) };
+  });
+
+  server.get("/v1/investigation-runs/:runId/events", { preHandler: apiAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for investigation runs" });
+    const runId = z.string().uuid().safeParse((request.params as { runId?: string }).runId);
+    if (!runId.success) return reply.code(400).send({ error: "Invalid investigation run ID" });
+    const initial = await store.getInvestigationRun(config.TRACEY_TENANT_ID, runId.data);
+    if (!initial) return reply.code(404).send({ error: "Investigation run not found" });
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    let closed = false;
+    let fingerprint = "";
+    const close = () => { closed = true; };
+    request.raw.once("close", close);
+    try {
+      while (!closed) {
+        const run = await store.getInvestigationRun(config.TRACEY_TENANT_ID, runId.data);
+        if (!run) break;
+        const steps = await store.listInvestigationRunSteps(config.TRACEY_TENANT_ID, runId.data);
+        const nextFingerprint = `${run.status}:${run.stage}:${run.progress}:${run.attempts}:${steps.length}:${run.updatedAt}`;
+        if (nextFingerprint !== fingerprint) {
+          fingerprint = nextFingerprint;
+          reply.raw.write(`event: progress\ndata: ${JSON.stringify({ run, steps })}\n\n`);
+        } else {
+          reply.raw.write(": keep-alive\n\n");
+        }
+        if (["completed", "failed", "cancelled"].includes(run.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    } catch (error) {
+      if (!closed) reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: "Investigation progress stream failed" })}\n\n`);
+      request.log.error({ errorType: error instanceof Error ? error.name : "UnknownError", runId: runId.data }, "Investigation progress stream failed");
+    } finally {
+      request.raw.off("close", close);
+      if (!closed) reply.raw.end();
+    }
+  });
+
+  server.post("/v1/investigation-runs/:runId/cancel", { preHandler: analystAuth }, async (request, reply) => {
+    if (!store) return reply.code(503).send({ error: "DATABASE_URL is required for investigation runs" });
+    const runId = z.string().uuid().safeParse((request.params as { runId?: string }).runId);
+    if (!runId.success) return reply.code(400).send({ error: "Invalid investigation run ID" });
+    const run = await store.cancelInvestigationRun(config.TRACEY_TENANT_ID, runId.data);
+    return run ? { run } : reply.code(409).send({ error: "Investigation run is not active" });
+  });
+
+  server.post("/v1/internal/investigation-runs/:runId/execute", { preHandler: adminAuth }, async (request, reply) => {
+    if (!agentic) return reply.code(503).send({ error: "Agentic investigation requires PostgreSQL, SigNoz, and OPENROUTER_API_KEY" });
+    const runId = z.string().uuid().safeParse((request.params as { runId?: string }).runId);
+    if (!runId.success) return reply.code(400).send({ error: "Invalid investigation run ID" });
+    try {
+      return await agentic.executeQueuedRun(runId.data);
+    } catch (error) {
+      request.log.error({ errorType: error instanceof Error ? error.name : "UnknownError", runId: runId.data }, "Background investigation execution failed");
+      return reply.code(503).send({ error: error instanceof Error ? error.message : "Background investigation failed" });
+    }
+  });
+
   server.post("/v1/investigations/:sessionId/messages", { preHandler: analystAuth }, async (request, reply) => {
     if (!agentic) return reply.code(503).send({ error: "Agentic investigation requires PostgreSQL, SigNoz, and OPENROUTER_API_KEY" });
     const parsed = z.object({ sessionId: z.string().uuid(), content: z.string().trim().min(1).max(8_000) }).safeParse({
@@ -554,13 +651,17 @@ export function buildServer(config: AppConfig) {
     });
     if (!parsed.success) return reply.code(400).send({ error: "Invalid investigation message", issues: parsed.error.issues });
     try {
-      return await agentic.chat(parsed.data.sessionId, parsed.data.content, {
-        subject: request.authContext!.subject,
-        roles: request.authContext!.roles,
+      const queued = await store!.enqueueInvestigationRun(config.TRACEY_TENANT_ID, {
+        sessionId: parsed.data.sessionId,
+        content: parsed.data.content,
+        actorSubject: request.authContext!.subject,
+        actorRoles: request.authContext!.roles,
       });
+      return reply.code(202).send(queued);
     } catch (error) {
-      request.log.error({ err: error }, "Agentic investigation failed");
-      return reply.code(503).send({ error: error instanceof Error ? error.message : "Agentic investigation failed" });
+      request.log.error({ errorType: error instanceof Error ? error.name : "UnknownError" }, "Agentic investigation queueing failed");
+      const message = error instanceof Error ? error.message : "Investigation could not be queued";
+      return reply.code(message.includes("already running") ? 409 : 503).send({ error: message });
     }
   });
 

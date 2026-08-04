@@ -5,6 +5,14 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_dir}"
 
+if [[ -n "${TRACEY_APPLICATION_DB_ROLE:-}" ]]; then
+  [[ "${TRACEY_APPLICATION_DB_ROLE}" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || {
+    echo "TRACEY_APPLICATION_DB_ROLE is not a valid PostgreSQL role name" >&2
+    exit 1
+  }
+  export PGOPTIONS="${PGOPTIONS:-} -c tracey.application_role=${TRACEY_APPLICATION_DB_ROLE}"
+fi
+
 psql "${DATABASE_URL}" --set ON_ERROR_STOP=1 <<'SQL'
 CREATE SCHEMA IF NOT EXISTS tracey;
 CREATE TABLE IF NOT EXISTS tracey.schema_migrations (

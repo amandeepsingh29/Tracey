@@ -21,21 +21,22 @@ verify the result, and recover when verification fails.
 - [x] Verify durable website scan leasing, retries, completion, and dead-letter
       handling against PostgreSQL.
 - [x] Test the complete `/security` workflow through the browser.
-- [ ] Commit and push the current verified changes.
+- [x] Commit and push the current verified changes.
 
 ## P0 — Resumable background investigations
 
-- [ ] Create a durable `investigation_run` job.
-- [ ] Move investigation execution from the API request into workers.
-- [ ] Persist investigation steps and tool-call progress.
-- [ ] Add bounded retries, timeouts, and latency budgets for every tool.
-- [ ] Continue remaining investigation steps when one source fails.
-- [ ] Add investigation cancellation.
-- [ ] Recover expired investigation leases after worker failure.
-- [ ] Stream partial progress and completed steps to the chat UI.
-- [ ] Restore an active investigation after browser refresh.
-- [ ] Prevent responses that promise to continue without queued work.
-- [ ] Test API and worker restarts during an investigation.
+- [x] Create a durable `investigation_run` job.
+- [x] Move investigation orchestration off the user request path into durable
+      worker jobs.
+- [x] Persist investigation steps and tool-call progress.
+- [x] Add bounded retries, timeouts, and latency budgets for every tool.
+- [x] Continue remaining investigation steps when one source fails.
+- [x] Add investigation cancellation.
+- [x] Recover expired investigation leases after worker failure.
+- [x] Stream partial progress and completed steps to the chat UI.
+- [x] Restore an active investigation after browser refresh.
+- [x] Prevent responses that promise to continue without queued work.
+- [x] Test API and worker restarts during an investigation.
 
 Acceptance criteria:
 
@@ -46,16 +47,16 @@ Acceptance criteria:
 
 ## P0 — Agentic website security
 
-- [ ] Pass completed deterministic scanner findings into a Tracey
+- [x] Pass completed deterministic scanner findings into a Tracey
       investigation.
-- [ ] Generate an evidence-grounded security summary.
-- [ ] Rank findings using observed severity and application context.
-- [ ] Visually separate deterministic evidence from model interpretation.
-- [ ] Link every model claim to a stored scanner finding.
-- [ ] Reject unsupported or invented vulnerability claims.
-- [ ] Support follow-up questions about a completed scan.
-- [ ] Add an investigation link to each completed scan.
-- [ ] Define written authorization, scope, rate limits, and audit requirements
+- [x] Generate an evidence-grounded security summary.
+- [x] Rank findings using observed severity and application context.
+- [x] Visually separate deterministic evidence from model interpretation.
+- [x] Link every model claim to a stored scanner finding.
+- [x] Reject unsupported or invented vulnerability claims.
+- [x] Support follow-up questions about a completed scan.
+- [x] Add an investigation link to each completed scan.
+- [x] Define written authorization, scope, rate limits, and audit requirements
       before adding browser-driven checks.
 
 Acceptance criteria:

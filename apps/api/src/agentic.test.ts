@@ -4,7 +4,7 @@ import type { AgentProducerType } from "@tracey/domain";
 import type { InvestigationService } from "@tracey/investigation";
 import type { InvestigationMessage, PostgresStore } from "@tracey/postgres-store";
 import type { AutonomyService } from "./autonomy-service.js";
-import { AgenticInvestigator, agentToolNames, agentToolNamesForProducerTypes, collectCitableEvidence, durableProposalMessage, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult } from "./agentic.js";
+import { AgenticInvestigator, agentToolNames, agentToolNamesForProducerTypes, collectCitableEvidence, durableProposalMessage, isExplicitActionConfirmation, isExplicitMutationRequest, isIncompleteActionPromise, resolveApplicationStatus, resolveCodexToolArguments, safeInvestigationResult, withLatencyBudget } from "./agentic.js";
 
 describe("bounded agentic investigator", () => {
   it("exposes remediation planning but no direct mutation adapter tools", () => {
@@ -17,6 +17,14 @@ describe("bounded agentic investigator", () => {
     for (const direct of ["restart_pod", "rollback_deployment", "scale_deployment", "edit_memory_limit", "edit_env_var"]) {
       assert.equal(agentToolNames.includes(direct), false);
     }
+  });
+
+  it("enforces a latency budget around every investigation tool", async () => {
+    await assert.rejects(
+      withLatencyBudget(new Promise((resolve) => setTimeout(resolve, 50)), 5),
+      (error: unknown) => error instanceof Error && error.name === "ToolTimeoutError" && /5ms/.test(error.message),
+    );
+    assert.equal(await withLatencyBudget(Promise.resolve("complete"), 50), "complete");
   });
 
   it("hides producer-specific tools when that connector is not enabled", () => {

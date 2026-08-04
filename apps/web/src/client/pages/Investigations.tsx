@@ -16,6 +16,7 @@ import { ErrorState, LoadingState, StatusChip } from "../components/ui";
 import { api } from "../lib/api";
 import { dateTime, relativeTime } from "../lib/format";
 import { usePersistedDraft } from "../lib/usePersistedDraft";
+import type { InvestigationRun } from "../types";
 
 function starterPrompts(hasKubernetes: boolean, hasAgentProducer: boolean) {
   return [
@@ -183,7 +184,10 @@ export function InvestigationDetailPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [messageDraft, setMessageDraft] = usePersistedDraft(`tracey.investigation-draft.${sessionId}`);
   const sessions = useQuery({ queryKey: ["investigations"], queryFn: api.investigations });
-  const messages = useQuery({ queryKey: ["messages", sessionId], queryFn: () => api.messages(sessionId), refetchInterval: 15_000 });
+  const runs = useQuery({ queryKey: ["investigation-runs", sessionId], queryFn: () => api.investigationRuns(sessionId), refetchInterval: (query) => query.state.data?.runs.some(({ status }) => status === "queued" || status === "running") ? 1_000 : 15_000 });
+  const activeRun = runs.data?.runs.find(({ status }) => status === "queued" || status === "running");
+  const messages = useQuery({ queryKey: ["messages", sessionId], queryFn: () => api.messages(sessionId), refetchInterval: activeRun ? 1_000 : 15_000 });
+  const runDetail = useQuery({ queryKey: ["investigation-run", activeRun?.runId], queryFn: () => api.investigationRun(activeRun!.runId), enabled: Boolean(activeRun), refetchInterval: activeRun ? 1_000 : false });
   const actions = useQuery({ queryKey: ["actions"], queryFn: () => api.actions(), refetchInterval: 5_000 });
   const connectors = useQuery({ queryKey: ["connectors"], queryFn: api.connectors });
   const suggestions = starterPrompts(
@@ -195,6 +199,7 @@ export function InvestigationDetailPage() {
     onSuccess: async () => {
       await Promise.all([
         client.invalidateQueries({ queryKey: ["messages", sessionId] }),
+        client.invalidateQueries({ queryKey: ["investigation-runs", sessionId] }),
         client.invalidateQueries({ queryKey: ["actions"] }),
         client.invalidateQueries({ queryKey: ["investigations"] }),
       ]);
@@ -208,6 +213,28 @@ export function InvestigationDetailPage() {
     }
   }, [searchParams]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages.data?.messages.length, send.isPending]);
+  useEffect(() => {
+    if (!activeRun) return;
+    const controller = new AbortController();
+    void api.streamInvestigationRun(activeRun.runId, (detail) => {
+      client.setQueryData(["investigation-run", activeRun.runId], detail);
+      client.setQueryData<{ runs: InvestigationRun[] }>(["investigation-runs", sessionId], (current) => ({
+        runs: current?.runs.map((run) => run.runId === detail.run.runId ? detail.run : run) ?? [detail.run],
+      }));
+      if (["completed", "failed", "cancelled"].includes(detail.run.status)) {
+        void Promise.all([
+          client.invalidateQueries({ queryKey: ["messages", sessionId] }),
+          client.invalidateQueries({ queryKey: ["actions"] }),
+          client.invalidateQueries({ queryKey: ["investigations"] }),
+        ]);
+      }
+    }, controller.signal).catch((error) => {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        void client.invalidateQueries({ queryKey: ["investigation-run", activeRun.runId] });
+      }
+    });
+    return () => controller.abort();
+  }, [activeRun?.runId, client, sessionId]);
   const session = sessions.data?.investigations.find((item) => item.sessionId === sessionId);
   const relatedActions = actions.data?.actions.filter((action) => action.sessionId === sessionId) ?? [];
   const pendingAction = relatedActions.find((action) => action.status === "awaiting_approval");
@@ -220,6 +247,15 @@ export function InvestigationDetailPage() {
     if (!content) return;
     send.mutate(content, { onSuccess: () => setMessageDraft("") });
   };
+  const cancelRun = useMutation({
+    mutationFn: (runId: string) => api.cancelInvestigationRun(runId),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["investigation-runs", sessionId] }),
+        client.invalidateQueries({ queryKey: ["messages", sessionId] }),
+      ]);
+    },
+  });
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -297,7 +333,7 @@ export function InvestigationDetailPage() {
               {message.evidenceRefs.length > 0 && <details className="chat-evidence"><summary>{message.evidenceRefs.length} source{message.evidenceRefs.length === 1 ? "" : "s"} used</summary>{message.evidenceRefs.map((reference, index) => <div key={reference.traceId ? `${reference.traceId}-${reference.spanId ?? index}` : `${reference.sourceType}-${reference.sourceId ?? index}`}><code>{reference.traceId ? `${reference.traceId}${reference.spanId ? ` / ${reference.spanId}` : ""}` : `${reference.sourceType ?? "tool"} · ${reference.sourceId ?? reference.signal ?? "observation"}`}</code>{reference.observation && <p>{reference.observation}</p>}</div>)}</details>}
             </div>
           </article>)}
-          {send.isPending && <article className="chat-turn chat-turn-assistant"><div className="chat-turn-avatar"><Bot /></div><div className="chat-turn-content"><header><strong>Tracey</strong></header><div className="thinking"><span /><span /><span />Gathering evidence…</div></div></article>}
+          {(send.isPending || activeRun) && <article className="chat-turn chat-turn-assistant"><div className="chat-turn-avatar"><Bot /></div><div className="chat-turn-content investigation-progress-card"><header><strong>Tracey</strong>{activeRun && <StatusChip value={activeRun.status} />}</header><div className="thinking"><span /><span /><span />{send.isPending ? "Queueing investigation…" : activeRun?.stage === "queued" ? "Waiting for a worker…" : activeRun?.stage.replaceAll("_", " ")}</div>{activeRun && <><div className="investigation-progress-track"><span style={{ width: `${Math.max(4, activeRun.progress)}%` }} /></div><footer><small>{activeRun.progress}% · attempt {activeRun.attempts || 1}</small><button onClick={() => cancelRun.mutate(activeRun.runId)} disabled={cancelRun.isPending}>Cancel</button></footer>{runDetail.data?.steps.length ? <details className="investigation-progress-steps"><summary>{runDetail.data.steps.length} completed step{runDetail.data.steps.length === 1 ? "" : "s"}</summary>{runDetail.data.steps.slice(-8).map((step) => <div key={step.stepId}><StatusChip value={step.status} /><span>{step.name}</span></div>)}</details> : null}</>}</div></article>}
           <div ref={endRef} />
         </div>
       </div>
@@ -326,10 +362,10 @@ export function InvestigationDetailPage() {
             onKeyDown={handleComposerKeyDown}
             placeholder="Ask Tracey a follow-up"
             aria-label="Message Tracey"
-            disabled={send.isPending}
+            disabled={send.isPending || Boolean(activeRun)}
           />
           <PolicyModeControl />
-          <button aria-label="Send message" disabled={send.isPending || !messageDraft.trim()}><Send /></button>
+          <button aria-label="Send message" disabled={send.isPending || Boolean(activeRun) || !messageDraft.trim()}><Send /></button>
         </form>
         <p>Enter to send · Shift + Enter for a new line · Changes always require policy evaluation</p>
         {send.error && <p className="composer-error" role="alert">{send.error.message}</p>}

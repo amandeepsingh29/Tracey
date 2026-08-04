@@ -37,6 +37,7 @@ const ConfigSchema = z.object({
   OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
   TRACEY_AGENT_MODEL: z.string().trim().min(1).max(200).default("tencent/hy3:free"),
   TRACEY_AGENT_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(120_000).default(60_000),
+  TRACEY_AGENT_TOOL_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   TRACEY_ACTION_WEBHOOK_URL: OptionalUrlSchema,
   TRACEY_ACTION_WEBHOOK_TOKEN: OptionalStringSchema,
   TRACEY_EXECUTOR_URL: OptionalUrlSchema,

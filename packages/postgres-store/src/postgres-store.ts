@@ -104,6 +104,36 @@ export interface InvestigationMessage {
   createdAt: string;
 }
 
+export interface InvestigationRun {
+  runId: string;
+  sessionId: string;
+  userMessageId: string;
+  resultMessageId?: string;
+  jobId: string;
+  actorSubject: string;
+  actorRoles: string[];
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  stage: string;
+  progress: number;
+  attempts: number;
+  errorType?: string;
+  userContent?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+}
+
+export interface InvestigationRunStep {
+  stepId: string;
+  runId: string;
+  kind: "queued" | "model" | "tool" | "synthesis" | "complete" | "retry";
+  name: string;
+  status: "started" | "completed" | "failed" | "skipped";
+  detail: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface TriggerRuleInput {
   agentId: string;
   name: string;
@@ -166,6 +196,12 @@ export interface WebsiteScan {
   completedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface WebsiteScanInvestigation {
+  scan: WebsiteScan;
+  target: WebsiteTarget;
+  session: InvestigationSession;
 }
 
 export interface ActionProposal {
@@ -763,6 +799,192 @@ export class PostgresStore {
     });
   }
 
+  async enqueueInvestigationRun(tenantId: string, input: {
+    sessionId: string; content: string; actorSubject: string; actorRoles: string[];
+  }): Promise<{ run: InvestigationRun; message: InvestigationMessage }> {
+    const parsed = z.object({
+      sessionId: z.string().uuid(),
+      content: z.string().trim().min(1).max(8_000),
+      actorSubject: z.string().trim().min(1).max(300),
+      actorRoles: z.array(z.string().trim().min(1).max(100)).max(20),
+    }).parse(input);
+    return this.withTenant(tenantId, async (client) => {
+      const session = await client.query(
+        `SELECT status FROM tracey.investigation_sessions WHERE tenant_id=$1 AND session_id=$2 FOR UPDATE`,
+        [tenantId, parsed.sessionId],
+      );
+      if (!session.rows[0]) throw new PostgresStoreError("Investigation session not found");
+      if (session.rows[0].status !== "active") throw new PostgresStoreError("Investigation session is closed");
+      const active = await client.query(
+        `SELECT run_id FROM tracey.investigation_runs
+          WHERE tenant_id=$1 AND session_id=$2 AND status IN ('queued','running') LIMIT 1`,
+        [tenantId, parsed.sessionId],
+      );
+      if (active.rows[0]) throw new PostgresStoreError("An investigation is already running for this session");
+      const messageId = randomUUID();
+      const runId = randomUUID();
+      const jobId = randomUUID();
+      const messageResult = await client.query(
+        `INSERT INTO tracey.investigation_messages
+          (tenant_id,message_id,session_id,role,content,evidence_refs)
+         VALUES ($1,$2,$3,'user',$4,'[]'::jsonb)
+         RETURNING message_id,session_id,role,content,evidence_refs,created_at`,
+        [tenantId, messageId, parsed.sessionId, parsed.content],
+      );
+      await client.query(
+        `INSERT INTO tracey.durable_jobs
+          (tenant_id,job_id,job_type,dedupe_key,payload,max_attempts)
+         VALUES ($1,$2,'investigation_run',$3,$4::jsonb,5)`,
+        [tenantId, jobId, `investigation:${runId}`, JSON.stringify({ runId, sessionId: parsed.sessionId })],
+      );
+      const runResult = await client.query(
+        `INSERT INTO tracey.investigation_runs
+          (tenant_id,run_id,session_id,user_message_id,job_id,actor_subject,actor_roles)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *`,
+        [tenantId, runId, parsed.sessionId, messageId, jobId, parsed.actorSubject, JSON.stringify(parsed.actorRoles)],
+      );
+      await client.query(
+        `INSERT INTO tracey.investigation_run_steps (tenant_id,step_id,run_id,kind,name,status)
+         VALUES ($1,$2,$3,'queued','Investigation queued','completed')`,
+        [tenantId, randomUUID(), runId],
+      );
+      await client.query(`UPDATE tracey.investigation_sessions SET updated_at=now() WHERE tenant_id=$1 AND session_id=$2`, [tenantId, parsed.sessionId]);
+      const message = messageResult.rows[0];
+      return {
+        run: this.normalizeInvestigationRun(runResult.rows[0], parsed.content),
+        message: { messageId: String(message.message_id), sessionId: String(message.session_id), role: "user", content: String(message.content), evidenceRefs: message.evidence_refs as unknown[], createdAt: new Date(message.created_at as string).toISOString() },
+      };
+    });
+  }
+
+  async getInvestigationRun(tenantId: string, runId: string): Promise<InvestigationRun | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT run.*,message.content AS user_content
+           FROM tracey.investigation_runs run
+           JOIN tracey.investigation_messages message
+             ON message.tenant_id=run.tenant_id AND message.message_id=run.user_message_id
+          WHERE run.tenant_id=$1 AND run.run_id=$2`,
+        [tenantId, z.string().uuid().parse(runId)],
+      );
+      return result.rows[0] ? this.normalizeInvestigationRun(result.rows[0], String(result.rows[0].user_content)) : undefined;
+    });
+  }
+
+  async listInvestigationRuns(tenantId: string, sessionId: string, limit = 50): Promise<InvestigationRun[]> {
+    const safeLimit = boundedInteger(limit, 1, 100, "limit");
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT run.*,message.content AS user_content
+           FROM tracey.investigation_runs run
+           JOIN tracey.investigation_messages message
+             ON message.tenant_id=run.tenant_id AND message.message_id=run.user_message_id
+          WHERE run.tenant_id=$1 AND run.session_id=$2
+          ORDER BY run.created_at DESC,run.run_id DESC LIMIT $3`,
+        [tenantId, z.string().uuid().parse(sessionId), safeLimit],
+      );
+      return result.rows.map((row) => this.normalizeInvestigationRun(row, String(row.user_content)));
+    });
+  }
+
+  async listInvestigationRunSteps(tenantId: string, runId: string): Promise<InvestigationRunStep[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM tracey.investigation_run_steps WHERE tenant_id=$1 AND run_id=$2
+          ORDER BY created_at,step_id LIMIT 500`,
+        [tenantId, z.string().uuid().parse(runId)],
+      );
+      return result.rows.map((row) => ({ stepId: String(row.step_id), runId: String(row.run_id), kind: row.kind as InvestigationRunStep["kind"], name: String(row.name), status: row.status as InvestigationRunStep["status"], detail: row.detail as Record<string, unknown>, createdAt: new Date(row.created_at as string).toISOString() }));
+    });
+  }
+
+  async startInvestigationRun(tenantId: string, runId: string): Promise<InvestigationRun | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE tracey.investigation_runs
+            SET status='running',stage='starting',progress=GREATEST(progress,5),attempts=attempts+1,
+                error_type=NULL,started_at=COALESCE(started_at,now()),completed_at=NULL,updated_at=now()
+          WHERE tenant_id=$1 AND run_id=$2 AND status IN ('queued','running') RETURNING *`,
+        [tenantId, z.string().uuid().parse(runId)],
+      );
+      return result.rows[0] ? this.normalizeInvestigationRun(result.rows[0]) : undefined;
+    });
+  }
+
+  async recordInvestigationRunStep(tenantId: string, runId: string, input: {
+    kind: InvestigationRunStep["kind"]; name: string; status: InvestigationRunStep["status"];
+    stage: string; progress: number; detail?: Record<string, unknown>;
+  }): Promise<void> {
+    const parsed = z.object({ kind: z.enum(["queued","model","tool","synthesis","complete","retry"]), name: z.string().trim().min(1).max(200), status: z.enum(["started","completed","failed","skipped"]), stage: z.string().trim().min(1).max(100), progress: z.number().int().min(0).max(99), detail: z.record(z.unknown()).default({}) }).parse(input);
+    if (Buffer.byteLength(JSON.stringify(parsed.detail)) > 32_000) throw new PostgresStoreError("investigation step detail exceeds 32KB");
+    await this.withTenant(tenantId, async (client) => {
+      const updated = await client.query(
+        `UPDATE tracey.investigation_runs SET stage=$3,progress=GREATEST(progress,$4),updated_at=now()
+          WHERE tenant_id=$1 AND run_id=$2 AND status='running' RETURNING run_id`,
+        [tenantId, z.string().uuid().parse(runId), parsed.stage, parsed.progress],
+      );
+      if (!updated.rows[0]) throw new PostgresStoreError("Investigation run is not active");
+      await client.query(
+        `INSERT INTO tracey.investigation_run_steps
+          (tenant_id,step_id,run_id,kind,name,status,detail)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [tenantId, randomUUID(), runId, parsed.kind, parsed.name, parsed.status, JSON.stringify(parsed.detail)],
+      );
+    });
+  }
+
+  async completeInvestigationRun(tenantId: string, runId: string, resultMessageId: string): Promise<InvestigationRun | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE tracey.investigation_runs
+            SET status='completed',stage='complete',progress=100,result_message_id=$3,error_type=NULL,completed_at=now(),updated_at=now()
+          WHERE tenant_id=$1 AND run_id=$2 AND status='running' RETURNING *`,
+        [tenantId, z.string().uuid().parse(runId), z.string().uuid().parse(resultMessageId)],
+      );
+      if (result.rows[0]) await client.query(
+        `INSERT INTO tracey.investigation_run_steps (tenant_id,step_id,run_id,kind,name,status)
+         VALUES ($1,$2,$3,'complete','Investigation completed','completed')`,
+        [tenantId, randomUUID(), runId],
+      );
+      return result.rows[0] ? this.normalizeInvestigationRun(result.rows[0]) : undefined;
+    });
+  }
+
+  async recordInvestigationRunFailure(tenantId: string, runId: string, errorType: string, final: boolean): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE tracey.investigation_runs
+            SET status=$3,stage=$4,error_type=$5,completed_at=CASE WHEN $3='failed' THEN now() ELSE NULL END,updated_at=now()
+          WHERE tenant_id=$1 AND run_id=$2 AND status IN ('queued','running')`,
+        [tenantId, z.string().uuid().parse(runId), final ? "failed" : "queued", final ? "failed" : "retrying", z.string().min(1).max(200).parse(errorType)],
+      );
+    });
+  }
+
+  async cancelInvestigationRun(tenantId: string, runId: string): Promise<InvestigationRun | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE tracey.investigation_runs
+            SET status='cancelled',stage='cancelled',completed_at=now(),updated_at=now()
+          WHERE tenant_id=$1 AND run_id=$2 AND status IN ('queued','running') RETURNING *`,
+        [tenantId, z.string().uuid().parse(runId)],
+      );
+      return result.rows[0] ? this.normalizeInvestigationRun(result.rows[0]) : undefined;
+    });
+  }
+
+  private normalizeInvestigationRun(row: QueryResultRow, userContent?: string): InvestigationRun {
+    return {
+      runId: String(row.run_id), sessionId: String(row.session_id), userMessageId: String(row.user_message_id), jobId: String(row.job_id),
+      ...(row.result_message_id ? { resultMessageId: String(row.result_message_id) } : {}), actorSubject: String(row.actor_subject),
+      actorRoles: z.array(z.string()).parse(row.actor_roles), status: row.status as InvestigationRun["status"], stage: String(row.stage),
+      progress: Number(row.progress), attempts: Number(row.attempts), ...(row.error_type ? { errorType: String(row.error_type) } : {}),
+      ...(userContent ? { userContent } : {}), createdAt: new Date(row.created_at as string).toISOString(),
+      ...(row.started_at ? { startedAt: new Date(row.started_at as string).toISOString() } : {}),
+      ...(row.completed_at ? { completedAt: new Date(row.completed_at as string).toISOString() } : {}), updatedAt: new Date(row.updated_at as string).toISOString(),
+    };
+  }
+
   async recordAgentToolAudit(tenantId: string, input: {
     sessionId: string; toolName: string; outcome: "success" | "error" | "denied";
     arguments: unknown; evidenceRefs: unknown[]; durationMs: number;
@@ -1173,6 +1395,76 @@ export class PostgresStore {
       );
       return result.rows[0] ? this.normalizeWebsiteScan(result.rows[0]) : undefined;
     });
+  }
+
+  async getWebsiteScanInvestigation(tenantId: string, sessionId: string): Promise<WebsiteScanInvestigation | undefined> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT scan.*,session.session_id AS linked_session_id,target.origin,target.status AS target_status,target.verified_at,target.verified_by,
+                target.created_by AS target_created_by,target.created_at AS target_created_at,target.updated_at AS target_updated_at,
+                session.title,session.status AS session_status,session.created_at AS session_created_at,session.updated_at AS session_updated_at
+           FROM tracey.website_scan_investigations link
+           JOIN tracey.website_scans scan ON scan.tenant_id=link.tenant_id AND scan.scan_id=link.scan_id
+           JOIN tracey.website_targets target ON target.tenant_id=scan.tenant_id AND target.target_id=scan.target_id
+           JOIN tracey.investigation_sessions session ON session.tenant_id=link.tenant_id AND session.session_id=link.session_id
+          WHERE link.tenant_id=$1 AND link.session_id=$2`,
+        [tenantId, z.string().uuid().parse(sessionId)],
+      );
+      const row = result.rows[0];
+      if (!row) return undefined;
+      return {
+        scan: this.normalizeWebsiteScan(row),
+        target: {
+          targetId: String(row.target_id), origin: String(row.origin), status: row.target_status as WebsiteTarget["status"],
+          ...(row.verified_at ? { verifiedAt: new Date(row.verified_at as string).toISOString() } : {}),
+          ...(row.verified_by ? { verifiedBy: String(row.verified_by) } : {}), createdBy: String(row.target_created_by),
+          createdAt: new Date(row.target_created_at as string).toISOString(), updatedAt: new Date(row.target_updated_at as string).toISOString(),
+        },
+        session: {
+          sessionId: String(row.linked_session_id), title: String(row.title), status: row.session_status as InvestigationSession["status"],
+          createdAt: new Date(row.session_created_at as string).toISOString(), updatedAt: new Date(row.session_updated_at as string).toISOString(),
+        },
+      };
+    });
+  }
+
+  async createWebsiteScanInvestigation(tenantId: string, scanId: string, actorSubject: string, actorRoles: string[]): Promise<WebsiteScanInvestigation> {
+    const id = z.string().uuid().parse(scanId);
+    const subject = z.string().trim().min(1).max(300).parse(actorSubject);
+    z.array(z.string().trim().min(1).max(100)).min(1).max(20).parse(actorRoles);
+    const existing = await this.withTenant(tenantId, async (client) => {
+      const linked = await client.query(`SELECT session_id FROM tracey.website_scan_investigations WHERE tenant_id=$1 AND scan_id=$2`, [tenantId, id]);
+      return linked.rows[0] ? String(linked.rows[0].session_id) : undefined;
+    });
+    if (existing) return (await this.getWebsiteScanInvestigation(tenantId, existing))!;
+    const scan = await this.getWebsiteScan(tenantId, id);
+    if (!scan || scan.status !== "completed" || !scan.result) throw new PostgresStoreError("Only a completed website scan can start an investigation");
+    const target = await this.getWebsiteTarget(tenantId, scan.targetId);
+    if (!target?.verifiedAt) throw new PostgresStoreError("Website ownership is not verified");
+    const session = await this.createInvestigationSession(tenantId, `Security review: ${target.origin}`);
+    try {
+      await this.withTenant(tenantId, async (client) => {
+        await client.query(
+          `INSERT INTO tracey.website_scan_investigations (tenant_id,scan_id,session_id) VALUES ($1,$2,$3)`,
+          [tenantId, id, session.sessionId],
+        );
+      });
+      await this.enqueueInvestigationRun(tenantId, {
+        sessionId: session.sessionId,
+        content: `Review authorized website scan ${id}. Rank the stored findings and explain the observed evidence and remediation without claiming the website is safe.`,
+        actorSubject: subject,
+        actorRoles,
+      });
+      return (await this.getWebsiteScanInvestigation(tenantId, session.sessionId))!;
+    } catch (error) {
+      await this.withTenant(tenantId, (client) => client.query(`DELETE FROM tracey.investigation_sessions WHERE tenant_id=$1 AND session_id=$2`, [tenantId, session.sessionId])).catch(() => undefined);
+      const concurrent = await this.withTenant(tenantId, async (client) => {
+        const linked = await client.query(`SELECT session_id FROM tracey.website_scan_investigations WHERE tenant_id=$1 AND scan_id=$2`, [tenantId, id]);
+        return linked.rows[0] ? String(linked.rows[0].session_id) : undefined;
+      }).catch(() => undefined);
+      if (concurrent) return (await this.getWebsiteScanInvestigation(tenantId, concurrent))!;
+      throw error;
+    }
   }
 
   async startWebsiteScan(tenantId: string, scanId: string): Promise<WebsiteScan | undefined> {

@@ -40,13 +40,21 @@ const BeforeAfterSchema = BeforeAfterObject.refine(validComparisonWindows, "inva
 export type EvidenceRef = {
   traceId?: string;
   spanId?: string;
-  sourceType?: "kubernetes" | "signoz" | "tracey";
+  sourceType?: "kubernetes" | "signoz" | "tracey" | "website_scan";
   sourceId?: string;
   observation?: string;
   signal?: string;
 };
 type ModelMessage = Record<string, unknown> & { role: string; content?: unknown };
 export interface AgenticActorContext { subject: string; roles: string[] }
+export interface InvestigationProgress {
+  kind: "model" | "tool" | "synthesis";
+  name: string;
+  status: "started" | "completed" | "failed" | "skipped";
+  stage: string;
+  progress: number;
+  detail?: Record<string, unknown>;
+}
 
 interface ToolCall {
   id: string;
@@ -863,6 +871,25 @@ function redactModelText(value: string): string {
     .slice(0, 2_000);
 }
 
+export async function withLatencyBudget<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`Tool exceeded its ${timeoutMs}ms latency budget`);
+          error.name = "ToolTimeoutError";
+          reject(error);
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function validateCitations(content: string, evidence: EvidenceRef[]): string {
   const allowed = new Set(evidence
     .filter((ref): ref is EvidenceRef & { traceId: string } => typeof ref.traceId === "string")
@@ -876,6 +903,7 @@ export interface AgenticInvestigatorConfig {
   model: string;
   baseUrl?: string;
   timeoutMs?: number;
+  toolTimeoutMs?: number;
   tenantId: string;
   environment: string;
   allowedNamespaces?: string[];
@@ -923,6 +951,50 @@ export class AgenticInvestigator {
   async chat(sessionId: string, userInput: string, actor: AgenticActorContext = { subject: "tracey-agent", roles: ["analyst"] }) {
     const content = ChatInputSchema.parse(userInput);
     await this.store.appendInvestigationMessage(this.config.tenantId, { sessionId, role: "user", content });
+    return this.respond(sessionId, content, actor);
+  }
+
+  async executeQueuedRun(runId: string) {
+    const queued = await this.store.getInvestigationRun(this.config.tenantId, runId);
+    const started = await this.store.startInvestigationRun(this.config.tenantId, runId);
+    if (!started) {
+      const existing = await this.store.getInvestigationRun(this.config.tenantId, runId);
+      if (existing?.status === "completed" && existing.resultMessageId) {
+        return { run: existing, message: (await this.store.listInvestigationMessages(this.config.tenantId, existing.sessionId, 200)).find(({ messageId }) => messageId === existing.resultMessageId) };
+      }
+      throw new Error(existing?.status === "cancelled" ? "Investigation run was cancelled" : "Investigation run is not executable");
+    }
+    if (!queued?.userContent) throw new Error("Investigation run has no persisted user message");
+    const progress = async (step: InvestigationProgress) => {
+      await this.store.recordInvestigationRunStep(this.config.tenantId, runId, step);
+    };
+    try {
+      const message = await this.respond(started.sessionId, queued.userContent, {
+        subject: started.actorSubject,
+        roles: started.actorRoles,
+      }, progress);
+      const completed = await this.store.completeInvestigationRun(this.config.tenantId, runId, message.messageId);
+      if (!completed) throw new Error("Investigation run was cancelled before completion");
+      return { run: completed, message };
+    } catch (error) {
+      const current = await this.store.getInvestigationRun(this.config.tenantId, runId);
+      if (current?.status !== "cancelled") {
+        await this.store.recordInvestigationRunFailure(this.config.tenantId, runId, error instanceof Error ? error.name : "UnknownError", false);
+      }
+      throw error;
+    }
+  }
+
+  private async respond(
+    sessionId: string,
+    content: string,
+    actor: AgenticActorContext,
+    progress?: (step: InvestigationProgress) => Promise<void>,
+  ) {
+    const websiteScan = typeof this.store.getWebsiteScanInvestigation === "function"
+      ? await this.store.getWebsiteScanInvestigation(this.config.tenantId, sessionId)
+      : undefined;
+    if (websiteScan) return this.respondToWebsiteScan(sessionId, content, websiteScan, progress);
     const confirmedAction = await this.executePendingConfirmation(sessionId, content, actor);
     if (confirmedAction) return confirmedAction;
     const history = await this.store.listInvestigationMessages(this.config.tenantId, sessionId, 100);
@@ -940,12 +1012,15 @@ export class AgenticInvestigator {
     let responseModel = this.config.model;
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
+      await progress?.({ kind: "model", name: `Model reasoning ${iteration + 1}`, status: "started", stage: "reasoning", progress: Math.min(15 + iteration * 8, 70) });
       const response = await this.callModel(messages);
+      await progress?.({ kind: "model", name: `Model reasoning ${iteration + 1}`, status: "completed", stage: "reasoning", progress: Math.min(20 + iteration * 8, 75), detail: { model: response.model ?? this.config.model } });
       responseModel = response.model ?? responseModel;
       const assistant = response.choices[0]!.message;
       messages.push(assistant as ModelMessage); // preserve OpenRouter reasoning_details unmodified
       const calls = assistant.tool_calls ?? [];
       if (calls.length === 0) {
+        await progress?.({ kind: "synthesis", name: "Evidence synthesis", status: "started", stage: "synthesizing", progress: 90 });
         let finalContent = assistant.content?.trim();
         if (isExplicitMutationRequest(content) && !durableProposalCreated && iteration < MAX_ITERATIONS - 1) {
           messages.push({
@@ -973,9 +1048,11 @@ export class AgenticInvestigator {
             : "Tracey could not verify any technical findings because the selected tools returned no citable evidence. Adjust the service, identifier, or time range and try again."
           : validateCitations(finalContent || "The provider returned no evidence-backed textual answer.", [...evidence.values()]);
         const grounding = evidence.size > 0 ? "evidence_bound" : toolCallCount > 0 ? "tool_grounded" : "model_only";
-        return this.store.appendInvestigationMessage(this.config.tenantId, {
+        const saved = await this.store.appendInvestigationMessage(this.config.tenantId, {
           sessionId, role: "assistant", content: answer, evidenceRefs: [...evidence.values()], model: responseModel, grounding, toolCallCount,
         });
+        await progress?.({ kind: "synthesis", name: "Evidence synthesis", status: "completed", stage: "finalizing", progress: 99, detail: { grounding, evidenceRefs: evidence.size, toolCallCount } });
+        return saved;
       }
 
       for (const call of calls) {
@@ -989,9 +1066,14 @@ export class AgenticInvestigator {
         let args: unknown = {};
         let result: unknown;
         let refs: EvidenceRef[] = [];
+        await progress?.({ kind: "tool", name: call.function.name, status: "started", stage: `tool:${call.function.name}`, progress: Math.min(25 + toolCallCount * 5, 85) });
         try {
           args = JSON.parse(call.function.arguments || "{}");
-          result = safeInvestigationResult(call.function.name, await this.executeTool(call, args, sessionId, actor));
+          const toolTimeoutMs = this.config.toolTimeoutMs ?? 30_000;
+          result = safeInvestigationResult(call.function.name, await withLatencyBudget(
+            this.executeTool(call, args, sessionId, actor),
+            toolTimeoutMs,
+          ));
           if (call.function.name === "propose_remediation") {
             durableProposalCreated = true;
             durableProposalResult = result;
@@ -1011,12 +1093,13 @@ export class AgenticInvestigator {
         await this.store.recordAgentToolAudit(this.config.tenantId, {
           sessionId, toolName: call.function.name, outcome, arguments: args, evidenceRefs: refs, durationMs: performance.now() - started,
         });
+        await progress?.({ kind: "tool", name: call.function.name, status: outcome === "success" ? "completed" : "failed", stage: `tool:${call.function.name}`, progress: Math.min(30 + toolCallCount * 5, 88), detail: { outcome, evidenceRefs: refs.length } });
         const serialized = JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: serialized.slice(0, MAX_TOOL_RESULT_CHARS) });
       }
     }
     if (durableProposalCreated) {
-      return this.store.appendInvestigationMessage(this.config.tenantId, {
+      const saved = await this.store.appendInvestigationMessage(this.config.tenantId, {
         sessionId,
         role: "assistant",
         content: durableProposalMessage(durableProposalResult),
@@ -1025,8 +1108,82 @@ export class AgenticInvestigator {
         grounding: evidence.size > 0 ? "evidence_bound" : "tool_grounded",
         toolCallCount,
       });
+      await progress?.({ kind: "synthesis", name: "Durable proposal result", status: "completed", stage: "finalizing", progress: 99, detail: { evidenceRefs: evidence.size, toolCallCount } });
+      return saved;
     }
     throw new Error("Agent iteration budget exhausted before a final answer");
+  }
+
+  private async respondToWebsiteScan(
+    sessionId: string,
+    userInput: string,
+    linked: Awaited<ReturnType<PostgresStore["getWebsiteScanInvestigation"]>> & {},
+    progress?: (step: InvestigationProgress) => Promise<void>,
+  ): Promise<InvestigationMessage> {
+    const FindingSchema = z.object({
+      findingId: z.string().min(1).max(64), title: z.string().min(1).max(300), severity: z.enum(["high", "medium", "low", "info"]),
+      category: z.string().min(1).max(100), evidence: z.string().min(1).max(2_000), remediation: z.string().min(1).max(2_000), standard: z.string().min(1).max(200),
+    });
+    const ResultSchema = z.object({
+      origin: z.string().url(), scannedAt: z.string(), statusCode: z.number().int(), findings: z.array(FindingSchema).max(200),
+      summary: z.object({ high: z.number().int().nonnegative(), medium: z.number().int().nonnegative(), low: z.number().int().nonnegative(), info: z.number().int().nonnegative() }),
+      scope: z.object({ requestsMade: z.number().int().nonnegative(), activePayloads: z.literal(false), sameOriginOnly: z.literal(true) }).passthrough(),
+    }).passthrough();
+    const result = ResultSchema.parse(linked.scan.result);
+    const scanRef: EvidenceRef = {
+      sourceType: "website_scan", sourceId: linked.scan.scanId, signal: "website.scan.summary",
+      observation: `Authorized bounded scan of ${result.origin} returned HTTP ${result.statusCode} and stored ${result.findings.length} deterministic finding${result.findings.length === 1 ? "" : "s"}.`,
+    };
+    const findingRefs = result.findings.map((finding): EvidenceRef => ({
+      sourceType: "website_scan", sourceId: `${linked.scan.scanId}:${finding.findingId}`, signal: `website.finding.${finding.severity}`,
+      observation: `${finding.title}: ${finding.evidence}`.slice(0, 500),
+    }));
+    await progress?.({ kind: "tool", name: "inspect_website_scan", status: "started", stage: "tool:inspect_website_scan", progress: 20 });
+    const toolStarted = performance.now();
+    await this.store.recordAgentToolAudit(this.config.tenantId, {
+      sessionId, toolName: "inspect_website_scan", outcome: "success", arguments: { scanId: linked.scan.scanId },
+      evidenceRefs: [scanRef, ...findingRefs], durationMs: performance.now() - toolStarted,
+    });
+    await progress?.({ kind: "tool", name: "inspect_website_scan", status: "completed", stage: "tool:inspect_website_scan", progress: 45, detail: { findings: result.findings.length } });
+
+    await progress?.({ kind: "model", name: "Rank stored website findings", status: "started", stage: "reasoning", progress: 60 });
+    let selectedIds: string[] = [];
+    let responseModel = this.config.model;
+    if (result.findings.length > 0) {
+      try {
+        const selection = await this.callModel([
+          { role: "system", content: "Select and order only the stored finding IDs most relevant to the user's question. Return JSON only: {\"rankedFindingIds\":[\"id\"]}. Never add an ID or vulnerability." },
+          { role: "user", content: JSON.stringify({ question: userInput, findings: result.findings.map(({ findingId, title, severity, category, standard }) => ({ findingId, title, severity, category, standard })) }) },
+        ], false);
+        responseModel = selection.model ?? responseModel;
+        const raw = selection.choices[0]!.message.content ?? "";
+        const json = raw.match(/\{[\s\S]*\}/)?.[0] ?? "{}";
+        const proposed = z.object({ rankedFindingIds: z.array(z.string()).max(200) }).parse(JSON.parse(json)).rankedFindingIds;
+        const allowed = new Set(result.findings.map(({ findingId }) => findingId));
+        selectedIds = [...new Set(proposed.filter((id) => allowed.has(id)))];
+      } catch {
+        selectedIds = [];
+      }
+    }
+    const severityOrder = new Map([["high", 0], ["medium", 1], ["low", 2], ["info", 3]]);
+    const fallback = [...result.findings].sort((left, right) => (severityOrder.get(left.severity) ?? 4) - (severityOrder.get(right.severity) ?? 4));
+    const byId = new Map(result.findings.map((finding) => [finding.findingId, finding]));
+    const ranked = (selectedIds.length ? selectedIds.map((id) => byId.get(id)!).filter(Boolean) : fallback);
+    await progress?.({ kind: "model", name: "Rank stored website findings", status: "completed", stage: "reasoning", progress: 75, detail: { selectedFindings: ranked.length, model: responseModel } });
+
+    const summary = `The authorized ${result.scope.requestsMade}-request, same-origin GET review returned HTTP ${result.statusCode} and stored ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}: ${result.summary.high} high, ${result.summary.medium} medium, ${result.summary.low} low, and ${result.summary.info} informational. This bounded result does not establish that the website is safe or vulnerability-free.`;
+    const evidenceSection = ranked.length === 0
+      ? "No finding was produced by the configured deterministic checks. This is not evidence that other vulnerabilities are absent."
+      : ranked.map((finding) => `### ${finding.title}\n\n- Observed severity: **${finding.severity}**\n- Observation: ${finding.evidence}\n- Standard: ${finding.standard}\n- Stored remediation: ${finding.remediation}\n- Evidence ID: \`${linked.scan.scanId}:${finding.findingId}\``).join("\n\n");
+    const priority = ranked.length === 0
+      ? "There are no stored findings to prioritize. Expand testing only after separately defining and authorizing the additional scope."
+      : ranked.map((finding, index) => `${index + 1}. **${finding.title}** — prioritize according to its observed ${finding.severity} severity and validate the stored remediation in a controlled environment.`).join("\n");
+    const answer = `## Deterministic scanner evidence\n\n${summary}\n\n${evidenceSection}\n\n## Tracey priority interpretation\n\nThe model selected the order only from stored finding IDs; Tracey did not create new findings.\n\n${priority}`;
+    const saved = await this.store.appendInvestigationMessage(this.config.tenantId, {
+      sessionId, role: "assistant", content: answer, evidenceRefs: [scanRef, ...findingRefs], model: responseModel, grounding: "evidence_bound", toolCallCount: 1,
+    });
+    await progress?.({ kind: "synthesis", name: "Grounded website report", status: "completed", stage: "finalizing", progress: 99, detail: { evidenceRefs: findingRefs.length + 1 } });
+    return saved;
   }
 
   private async executePendingConfirmation(

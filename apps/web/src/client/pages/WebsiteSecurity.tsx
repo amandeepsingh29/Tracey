@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Clipboard, Globe2, RefreshCw, ScanSearch, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Check, Clipboard, Globe2, MessageSquare, RefreshCw, ScanSearch, ShieldCheck, TriangleAlert } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { relativeTime, titleCase } from "../lib/format";
@@ -11,6 +12,7 @@ import { Button, EmptyState, ErrorState, Field, LoadingState, PageHeader, Panel,
 type Verification = { targetId: string; origin: string; path: string; content: string; instructions: string };
 
 export function WebsiteSecurityPage() {
+  const router = useRouter();
   const client = useQueryClient();
   const [verification, setVerification] = useState<Verification>();
   const [selectedTargetId, setSelectedTargetId] = useState<string>();
@@ -59,6 +61,11 @@ export function WebsiteSecurityPage() {
     },
     onError: (cause: Error) => setError(cause.message),
   });
+  const investigate = useMutation({
+    mutationFn: api.investigateWebsiteScan,
+    onSuccess: ({ investigation }) => router.push(`/investigations/${investigation.session.sessionId}`),
+    onError: (cause: Error) => setError(cause.message),
+  });
   const submitTarget = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -87,7 +94,7 @@ export function WebsiteSecurityPage() {
           </Panel>
           <div className="security-results-grid">
             <Panel title="Scan history" subtitle="Newest scans first.">{scans.isLoading ? <LoadingState /> : scans.error ? <ErrorState error={scans.error} onRetry={() => void scans.refetch()} /> : !scans.data?.scans.length ? <EmptyState icon={ScanSearch} title="No scans yet" description="Run the first bounded review for this website." /> : <div className="scan-history">{scans.data.scans.map((scan) => <button key={scan.scanId} className={scan.scanId === selectedScan?.scanId ? "active" : ""} onClick={() => setSelectedScanId(scan.scanId)}><span><strong>{relativeTime(scan.createdAt)}</strong><small>{scan.result ? `${scan.result.findings.length} findings · HTTP ${scan.result.statusCode}` : scan.errorType ?? "Waiting for worker"}</small></span><StatusChip value={scan.status} /></button>)}</div>}</Panel>
-            <Panel title="Latest result" subtitle={selectedScan ? `Requested ${relativeTime(selectedScan.createdAt)}` : "No scan selected"}>{!selectedScan ? <EmptyState title="No result selected" description="Choose a scan to inspect its evidence." /> : selectedScan.status === "queued" || selectedScan.status === "running" ? <LoadingState label={selectedScan.status === "queued" ? "Waiting for a worker" : "Reviewing the verified website"} /> : selectedScan.status === "failed" ? <ErrorState error={new Error(`Scan failed: ${selectedScan.errorType ?? "unknown error"}`)} /> : <ScanResult scan={selectedScan} total={totalFindings} summary={summary!} />}</Panel>
+            <Panel title="Latest result" subtitle={selectedScan ? `Requested ${relativeTime(selectedScan.createdAt)}` : "No scan selected"} action={selectedScan?.status === "completed" ? <Button variant="secondary" disabled={investigate.isPending} onClick={() => investigate.mutate(selectedScan.scanId)}><MessageSquare size={15} />{investigate.isPending ? "Opening…" : "Investigate"}</Button> : undefined}>{!selectedScan ? <EmptyState title="No result selected" description="Choose a scan to inspect its evidence." /> : selectedScan.status === "queued" || selectedScan.status === "running" ? <LoadingState label={selectedScan.status === "queued" ? "Waiting for a worker" : "Reviewing the verified website"} /> : selectedScan.status === "failed" ? <ErrorState error={new Error(`Scan failed: ${selectedScan.errorType ?? "unknown error"}`)} /> : <ScanResult scan={selectedScan} total={totalFindings} summary={summary!} />}</Panel>
           </div>
         </>}
       </div>

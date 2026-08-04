@@ -156,7 +156,7 @@ export type InvestigationSession = {
 export type EvidenceRef = {
   traceId?: string;
   spanId?: string;
-  sourceType?: "kubernetes" | "signoz" | "tracey";
+  sourceType?: "kubernetes" | "signoz" | "tracey" | "website_scan";
   sourceId?: string;
   observation?: string;
   signal?: string;
@@ -171,6 +171,35 @@ export type InvestigationMessage = {
   model?: string;
   grounding?: "evidence_bound" | "tool_grounded" | "model_only";
   toolCallCount?: number;
+  createdAt: string;
+};
+
+export type InvestigationRun = {
+  runId: string;
+  sessionId: string;
+  userMessageId: string;
+  resultMessageId?: string;
+  jobId: string;
+  actorSubject: string;
+  actorRoles: string[];
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  stage: string;
+  progress: number;
+  attempts: number;
+  errorType?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+};
+
+export type InvestigationRunStep = {
+  stepId: string;
+  runId: string;
+  kind: "queued" | "model" | "tool" | "synthesis" | "complete" | "retry";
+  name: string;
+  status: "started" | "completed" | "failed" | "skipped";
+  detail: Record<string, unknown>;
   createdAt: string;
 };
 
