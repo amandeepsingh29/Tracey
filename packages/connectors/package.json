@@ -18,9 +18,9 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "tsx": "^4.20.3"
+    "tsx": "^4.23.5"
   }
 }
