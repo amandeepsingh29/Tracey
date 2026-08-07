@@ -29,6 +29,6 @@
     "@tracey/telemetry": "workspace:*"
   },
   "devDependencies": {
-    "tsx": "^4.20.3"
+    "tsx": "^4.23.5"
   }
 }

@@ -14,10 +14,10 @@
     "@tracey/autonomy": "workspace:*",
     "@tracey/cloud-adapter": "workspace:*",
     "@tracey/postgres-store": "workspace:*",
-    "fastify": "^5.4.0",
-    "zod": "^3.25.76"
+    "fastify": "^5.11.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "tsx": "^4.20.3"
+    "tsx": "^4.23.5"
   }
 }

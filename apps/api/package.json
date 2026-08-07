@@ -12,7 +12,7 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.0",
     "@tracey/domain": "workspace:*",
     "@tracey/autonomy": "workspace:*",
@@ -28,11 +28,11 @@
     "@tracey/cloud-adapter": "workspace:*",
     "@tracey/connectors": "workspace:*",
     "dotenv": "^17.2.1",
-    "fastify": "^5.4.0",
-    "jose": "^6.2.3",
-    "zod": "^3.25.76"
+    "fastify": "^5.11.2",
+    "jose": "^6.2.8",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "tsx": "^4.20.3"
+    "tsx": "^4.23.5"
   }
 }
